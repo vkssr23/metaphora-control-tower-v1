@@ -16,6 +16,7 @@ export default function OperationsBoard() {
   const [trucks, setTrucks] = useState([]);
   const [drivers, setDrivers] = useState([]);
   const [filter, setFilter] = useState({ risk: "", customer: "", driver: "" });
+  const [dragOver, setDragOver] = useState(null);
   const nav = useNavigate();
 
   useEffect(() => {
@@ -24,6 +25,22 @@ export default function OperationsBoard() {
     api.get("/drivers").then(r=>setDrivers(r.data));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const onDrop = async (e, targetStage) => {
+    e.preventDefault();
+    setDragOver(null);
+    const loadId = e.dataTransfer.getData("text/loadId");
+    if (!loadId) return;
+    const load = loads.find(l => l.id === loadId);
+    if (!load || load.stage === targetStage) return;
+    // Optimistic update
+    setLoads(prev => prev.map(l => l.id === loadId ? {...l, stage: targetStage} : l));
+    try {
+      await api.post(`/loads/${loadId}/stage`, { stage: targetStage, updated_by: "Board DnD", notes: "Kanban drag" });
+    } catch {
+      setLoads(prev => prev.map(l => l.id === loadId ? {...l, stage: load.stage} : l));
+    }
+  };
 
   const truckMap = useMemo(()=>Object.fromEntries(trucks.map(t=>[t.id,t])), [trucks]);
   const driverMap = useMemo(()=>Object.fromEntries(drivers.map(d=>[d.id,d])), [drivers]);
@@ -37,7 +54,7 @@ export default function OperationsBoard() {
 
   return (
     <div>
-      <Topbar title="Operations Board" subtitle={`${filtered.length} loads · live kanban`} />
+      <Topbar title="Operations Board" subtitle={`${filtered.length} loads · drag cards to change stage`} />
       <div className="px-6 py-3 border-b border-zinc-800 flex items-center gap-3 flex-wrap bg-[#0A0A0C]">
         <div className="flex items-center gap-2 text-xs text-zinc-500"><Filter className="w-3.5 h-3.5" /> Filters</div>
         <select data-testid="filter-risk" value={filter.risk} onChange={e=>setFilter({...filter, risk:e.target.value})} className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs font-mono">
@@ -54,18 +71,24 @@ export default function OperationsBoard() {
           {COLUMNS.map(col => {
             const cards = filtered.filter(l => (col==="Exception" ? l.risk==="Critical" : l.stage===col));
             return (
-              <div key={col} className="w-[280px] shrink-0" data-testid={`kanban-col-${col}`}>
-                <div className="flex items-center justify-between mb-2 px-1">
+              <div key={col} className="w-[280px] shrink-0" data-testid={`kanban-col-${col}`}
+                onDragOver={(e)=>{e.preventDefault(); setDragOver(col);}}
+                onDragLeave={()=>setDragOver(null)}
+                onDrop={(e)=>onDrop(e, col)}
+              >
+                <div className={`flex items-center justify-between mb-2 px-1 py-1 rounded ${dragOver===col?"bg-sky-500/10 border border-sky-500/40":""}`}>
                   <div className="font-mono text-[10.5px] uppercase tracking-widest text-zinc-400">{col}</div>
                   <div className="text-[10px] text-zinc-500 font-mono">{cards.length}</div>
                 </div>
-                <div className="space-y-2 min-h-[80px]">
+                <div className={`space-y-2 min-h-[80px] rounded ${dragOver===col?"bg-sky-500/5":""}`}>
                   {cards.map(l => (
                     <div
                       key={l.id}
+                      draggable
+                      onDragStart={(e)=>e.dataTransfer.setData("text/loadId", l.id)}
                       onClick={()=>nav(`/loads/${l.id}`)}
                       data-testid={`load-card-${l.id}`}
-                      className="terminal-card p-3 cursor-pointer hover:border-sky-500/50 transition-colors"
+                      className="terminal-card p-3 cursor-move hover:border-sky-500/50 transition-colors active:opacity-50"
                     >
                       <div className="flex items-center justify-between mb-1.5">
                         <div className="font-mono text-xs text-sky-400 font-semibold">{l.id}</div>

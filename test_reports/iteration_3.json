@@ -1,0 +1,32 @@
+{
+  "summary": "Verified role-based sidebar gating (owner=18 ✓, finance=7 but expected 8 — Driver Scorecard missing for finance) and drag-drop kanban wiring (DOM attributes present, backend /api/loads/{id}/stage endpoint working with activity log). Regression on core login flow passed for both owner and finance.",
+  "tested_scope": ["frontend", "backend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/login owner & finance",
+    "POST /api/loads/{id}/stage returns {ok:true, stage:Assigned}; GET /api/loads/{id} reflects new stage",
+    "GET /api/activity?load_id=... shows Stage Change entry with old_status/new_status/updated_by/notes",
+    "Owner sidebar shows all 18 nav items",
+    "Finance sidebar correctly hides Trucks, Drivers, Dispatch, In-Transit Control, Weather, Fuel, Telematics, Truck Scorecard, Settings, Operations Board",
+    "Operations Board: load cards have draggable=true with onDragStart setting 'text/loadId'; columns have onDragOver/onDrop wired and data-testid kanban-col-{stage}",
+    "Logout via sidebar-logout-btn + re-login as finance works"
+  ],
+  "failed": [
+    {
+      "area": "Frontend role gating / Sidebar.jsx",
+      "issue": "Finance role sees 7 nav items but spec requires 8 — 'Driver Scorecard' is not visible. Sidebar.jsx line 24 has roles: ['owner','dispatcher','admin'], missing 'finance'.",
+      "evidence": "FINANCE links observed: ['Dashboard','Loads','Documents','Invoices','Trip P&L','Reports','AI Assistant']. Screenshot confirms 7 links only. Spec: 'Dashboard, Loads, Documents, Invoices, Trip P&L, Reports, AI Assistant, Driver Scorecard should be visible' (8 items).",
+      "priority": "MEDIUM"
+    }
+  ],
+  "action_items": [
+    "In /app/frontend/src/components/Sidebar.jsx line 24, add 'finance' to Driver Scorecard roles array: roles: ['owner','dispatcher','finance','admin'] — OR update the iteration spec if finance intentionally should not see it."
+  ],
+  "notes": [
+    "Drag-drop end-to-end via Playwright synthetic HTML5 DragEvent+DataTransfer could not be fully asserted through the UI because programmatic dataTransfer.setData often no-ops in synthetic events. However, all handlers are wired correctly on the DOM and the underlying POST /api/loads/{id}/stage flow (which the onDrop calls) is verified working end-to-end with activity log entry.",
+    "AI /api/ai/chat fallback behavior not re-tested this iteration (expected per note).",
+    "Mocked endpoints (/api/routing/calc, /api/weather/check, etc.) not exercised this iteration."
+  ],
+  "success_rate": {"backend": "100%", "frontend": "~93% (1 role-gating mismatch)"},
+  "retest_needed": true,
+  "full_testing_deferred": true
+}

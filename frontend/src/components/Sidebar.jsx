@@ -8,24 +8,24 @@ import {
 import { useAuth } from "../lib/auth";
 
 const NAV = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/board", label: "Operations Board", icon: Columns3 },
-  { to: "/loads", label: "Loads", icon: Package },
-  { to: "/trucks", label: "Trucks", icon: TruckIcon },
-  { to: "/drivers", label: "Drivers", icon: Users },
-  { to: "/dispatch", label: "Dispatch", icon: Radio },
-  { to: "/in-transit", label: "In-Transit Control", icon: Route },
-  { to: "/weather", label: "Weather & Road Risk", icon: CloudRain },
-  { to: "/fuel", label: "Fuel Stop Planner", icon: Fuel },
-  { to: "/telematics", label: "Samsara / Telematics", icon: Satellite },
-  { to: "/documents", label: "Documents", icon: FileText },
-  { to: "/invoices", label: "Invoices", icon: Receipt },
-  { to: "/pnl", label: "Trip P&L", icon: TrendingUp },
-  { to: "/driver-scorecard", label: "Driver Scorecard", icon: UserCheck },
-  { to: "/truck-scorecard", label: "Truck Scorecard", icon: Gauge },
-  { to: "/reports", label: "Reports", icon: BarChart3 },
-  { to: "/ai", label: "AI Assistant", icon: Sparkles },
-  { to: "/settings", label: "Settings", icon: Settings },
+  { to: "/", label: "Dashboard", icon: LayoutDashboard, roles: ["owner","dispatcher","finance","admin","driver"] },
+  { to: "/board", label: "Operations Board", icon: Columns3, roles: ["owner","dispatcher","admin"] },
+  { to: "/loads", label: "Loads", icon: Package, roles: ["owner","dispatcher","finance","admin","driver"] },
+  { to: "/trucks", label: "Trucks", icon: TruckIcon, roles: ["owner","dispatcher","admin"] },
+  { to: "/drivers", label: "Drivers", icon: Users, roles: ["owner","dispatcher","admin"] },
+  { to: "/dispatch", label: "Dispatch", icon: Radio, roles: ["owner","dispatcher","admin"] },
+  { to: "/in-transit", label: "In-Transit Control", icon: Route, roles: ["owner","dispatcher","admin"] },
+  { to: "/weather", label: "Weather & Road Risk", icon: CloudRain, roles: ["owner","dispatcher","admin"] },
+  { to: "/fuel", label: "Fuel Stop Planner", icon: Fuel, roles: ["owner","dispatcher","admin"] },
+  { to: "/telematics", label: "Samsara / Telematics", icon: Satellite, roles: ["owner","dispatcher","admin"] },
+  { to: "/documents", label: "Documents", icon: FileText, roles: ["owner","dispatcher","finance","admin"] },
+  { to: "/invoices", label: "Invoices", icon: Receipt, roles: ["owner","finance","admin"] },
+  { to: "/pnl", label: "Trip P&L", icon: TrendingUp, roles: ["owner","finance","admin"] },
+  { to: "/driver-scorecard", label: "Driver Scorecard", icon: UserCheck, roles: ["owner","dispatcher","admin"] },
+  { to: "/truck-scorecard", label: "Truck Scorecard", icon: Gauge, roles: ["owner","admin"] },
+  { to: "/reports", label: "Reports", icon: BarChart3, roles: ["owner","finance","admin"] },
+  { to: "/ai", label: "AI Assistant", icon: Sparkles, roles: ["owner","dispatcher","finance","admin"] },
+  { to: "/settings", label: "Settings", icon: Settings, roles: ["owner","admin"] },
 ];
 
 export default function Sidebar() {
@@ -44,7 +44,7 @@ export default function Sidebar() {
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5" data-testid="sidebar-nav">
-        {NAV.map((n) => (
+        {NAV.filter(n => !user?.role || n.roles.includes(user.role)).map((n) => (
           <NavLink
             key={n.to}
             to={n.to}
