@@ -16,7 +16,7 @@ export default function Login() {
     setBusy(true);
     try {
       await login(email, password);
-      toast.success("Welcome back to Dispatch OS");
+      toast.success("Welcome back to Dispatch.RR");
       nav("/");
     } catch (err) {
       toast.error(err?.response?.data?.detail || "Login failed");
@@ -34,7 +34,7 @@ export default function Login() {
             <Zap className="w-5 h-5 text-sky-400" />
           </div>
           <div>
-            <div className="font-display font-bold text-xl tracking-tight">AI Dispatch OS</div>
+            <div className="font-display font-bold text-xl tracking-tight">AI Dispatch.RR</div>
             <div className="font-mono text-[10px] text-zinc-500 uppercase tracking-widest">Trucking Operations Control Tower</div>
           </div>
         </div>

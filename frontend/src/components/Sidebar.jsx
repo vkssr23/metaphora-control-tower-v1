@@ -39,7 +39,7 @@ export default function Sidebar() {
           <Zap className="w-4 h-4 text-sky-400" strokeWidth={2} />
         </div>
         <div>
-          <div className="font-display font-bold text-sm tracking-tight">AI Dispatch OS</div>
+          <div className="font-display font-bold text-sm tracking-tight">AI Dispatch.RR</div>
           <div className="font-mono text-[10px] text-zinc-500 uppercase tracking-widest">Control Tower</div>
         </div>
       </div>

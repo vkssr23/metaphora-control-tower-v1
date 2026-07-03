@@ -1,4 +1,4 @@
-"""AI Dispatch OS - Trucking TMS Backend"""
+"""AI Dispatch.RR - Trucking TMS Backend"""
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
@@ -20,7 +20,7 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = os.environ.get('JWT_SECRET', 'dev_secret')
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
-app = FastAPI(title="AI Dispatch OS")
+app = FastAPI(title="AI Dispatch.RR")
 api = APIRouter(prefix="/api")
 
 # ============ UTILITIES ============
@@ -468,7 +468,7 @@ LOADS ({len(loads)}): {loads[:20]}
 TRUCKS ({len(trucks)}): {trucks[:15]}
 DRIVERS ({len(drivers)}): {drivers[:15]}
 INVOICES ({len(invoices)}): {invoices[:15]}
-Answer as the AI Dispatch OS control tower assistant. Be crisp, use bullet points, cite Load IDs, driver names, and truck numbers."""
+Answer as the AI Dispatch.RR control tower assistant. Be crisp, use bullet points, cite Load IDs, driver names, and truck numbers."""
 
     async def stream():
         try:
@@ -728,7 +728,7 @@ async def seed(force: bool = False):
 # ============ HEALTH ============
 @api.get("/")
 async def root():
-    return {"app": "AI Dispatch OS", "status": "operational", "time": now_iso()}
+    return {"app": "AI Dispatch.RR", "status": "operational", "time": now_iso()}
 
 app.include_router(api)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
