@@ -56,6 +56,7 @@ export default function LoadExecution() {
     refresh();
     api.get("/drivers").then(r=>setDrivers(r.data));
     api.get("/trucks").then(r=>setTrucks(r.data));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const driver = load ? drivers.find(d => d.id === load.driver_id) : null;

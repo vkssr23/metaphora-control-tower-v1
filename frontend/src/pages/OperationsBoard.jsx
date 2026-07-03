@@ -22,6 +22,7 @@ export default function OperationsBoard() {
     api.get("/loads").then(r=>setLoads(r.data));
     api.get("/trucks").then(r=>setTrucks(r.data));
     api.get("/drivers").then(r=>setDrivers(r.data));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const truckMap = useMemo(()=>Object.fromEntries(trucks.map(t=>[t.id,t])), [trucks]);

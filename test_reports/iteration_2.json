@@ -1,0 +1,26 @@
+{
+  "summary": "Regression test after lint-clean fixes (server.py var rename 'i'->'n' in fuel_trend comprehension + eslint-disable on 4 mount-only useEffects). No regressions found — all previously passing flows still work.",
+  "tested_scope": ["backend", "frontend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/login (owner@dispatch.com/owner123) -> 200 with JWT token",
+    "GET /api/dashboard/charts -> fuel_trend has 7 items with {day, cost} fields (rename fix verified)",
+    "GET /api/dashboard/stats, /api/loads, /api/trucks, /api/drivers -> 200",
+    "POST /api/loads/{id}/stage -> 200",
+    "POST /api/routing/calc, /api/weather/check, /api/roads/check, /api/samsara/vehicle, /api/fuel/plan -> 200 (MOCKED)",
+    "POST /api/alerts/generate -> 200 (with load_id + alert_type)",
+    "POST /api/documents, /api/invoices -> 200",
+    "POST /api/ai/chat streaming -> 200, returns Claude control-tower response (LLM budget not exceeded currently)",
+    "Frontend: Login page loads, submit navigates to dashboard",
+    "Dashboard renders all KPIs (Revenue $65,140, Gross Profit $42,206, Active Loads 15, etc.) + Recharts (Revenue trend line, Load distribution donut)",
+    "Operations Board renders with kanban columns (BOOKED, ASSIGNED, DISPATCHED, PICKUP STARTED visible) and 16 load cards",
+    "Clicking load card navigates to /loads/{id} LoadExecution page with Execution Timeline, Quick Actions (14 buttons), Weather/Road/Fuel widgets, Samsara data, Route Map",
+    "Sidebar logout button returns to /login",
+    "Zero console errors, zero React hook/deps warnings"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "notes": "The stage-column-* testid selector returned 0 elements but columns clearly render in screenshot (visible headers: BOOKED 8, ASSIGNED 1, DISPATCHED 2, PICKUP STARTED). Not a regression — testid may just differ from assumption. Load cards testid works correctly. Backend fuel_trend rename fix confirmed working."
+}

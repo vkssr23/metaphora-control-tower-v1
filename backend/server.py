@@ -581,7 +581,7 @@ async def dashboard_charts():
         "stage_distribution": [{"stage": k, "count": v} for k,v in stage_dist.items()],
         "profit_by_truck": profit_by_truck,
         "profit_by_driver": profit_by_driver,
-        "fuel_trend": [{"day": f"D-{i}", "cost": random.randint(400, 1400)} for i in range(7,0,-1)],
+        "fuel_trend": [{"day": f"D-{n}", "cost": random.randint(400, 1400)} for n in range(7,0,-1)],
     }
 
 # ============ SEED ============

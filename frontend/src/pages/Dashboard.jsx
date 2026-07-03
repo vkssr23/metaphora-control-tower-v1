@@ -28,6 +28,7 @@ export default function Dashboard() {
   useEffect(() => {
     api.get("/dashboard/stats").then(r => setStats(r.data));
     api.get("/dashboard/charts").then(r => setCharts(r.data));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!stats) return <div className="p-6 text-zinc-500">Loading control tower…</div>;

@@ -15,7 +15,7 @@ export default function Loads() {
   const nav = useNavigate();
 
   const load = () => api.get("/loads").then(r=>setLoads(r.data.sort((a,b)=>b.created_at.localeCompare(a.created_at))));
-  useEffect(() => { load(); api.get("/drivers").then(r=>setDrivers(r.data)); api.get("/trucks").then(r=>setTrucks(r.data)); }, []);
+  useEffect(() => { load(); api.get("/drivers").then(r=>setDrivers(r.data)); api.get("/trucks").then(r=>setTrucks(r.data)); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
   const create = async () => {
     if (!form.customer || !form.pickup_address || !form.delivery_address) { toast.error("Customer, pickup and delivery required"); return; }
