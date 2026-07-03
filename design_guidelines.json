@@ -1,0 +1,152 @@
+{
+  "theme": "dark",
+  "archetype": "Archetype 4 (Swiss & High-Contrast) - Dark Terminal Variant",
+  "colors": {
+    "background": "#09090B",
+    "surface": "#18181B",
+    "surface_elevated": "#27272A",
+    "primary": "#0EA5E9",
+    "primary_hover": "#0284C7",
+    "text_primary": "#F4F4F5",
+    "text_secondary": "#A1A1AA",
+    "text_muted": "#71717A",
+    "border": "#27272A",
+    "border_light": "#3F3F46",
+    "status": {
+      "success": "#10B981",
+      "warning": "#F59E0B",
+      "error": "#EF4444",
+      "info": "#3B82F6",
+      "critical": "#DC2626"
+    },
+    "risk_badges": {
+      "low": {
+        "bg": "#064E3B",
+        "text": "#34D399",
+        "border": "#047857"
+      },
+      "medium": {
+        "bg": "#78350F",
+        "text": "#FBBF24",
+        "border": "#B45309"
+      },
+      "high": {
+        "bg": "#7F1D1D",
+        "text": "#F87171",
+        "border": "#B91C1C"
+      },
+      "critical": {
+        "bg": "#450A0A",
+        "text": "#FCA5A5",
+        "border": "#DC2626"
+      }
+    }
+  },
+  "typography": {
+    "fonts": [
+      {
+        "name": "Chivo",
+        "url": "https://fonts.googleapis.com/css2?family=Chivo:wght@400;500;700;900&display=swap"
+      },
+      {
+        "name": "IBM Plex Sans",
+        "url": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      },
+      {
+        "name": "IBM Plex Mono",
+        "url": "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      }
+    ],
+    "headings": {
+      "family": "Chivo, sans-serif",
+      "weight": "700",
+      "tracking": "tracking-tight"
+    },
+    "body": {
+      "family": "'IBM Plex Sans', sans-serif",
+      "weight": "400",
+      "tracking": "tracking-normal"
+    },
+    "mono": {
+      "family": "'IBM Plex Mono', monospace",
+      "weight": "500",
+      "usage": "Data tables, load IDs, statuses, coordinates, speeds, timestamps"
+    },
+    "sizes": {
+      "h1": "text-2xl md:text-3xl lg:text-4xl",
+      "h2": "text-xl md:text-2xl",
+      "h3": "text-lg font-medium",
+      "body": "text-sm",
+      "small": "text-xs",
+      "micro": "text-[10px]"
+    }
+  },
+  "spacing_and_layout": {
+    "mode": "MODE B: THE CONTROL ROOM GRID",
+    "density": "High density, value-per-pixel maximized",
+    "padding": "p-3 or p-4 for cards, tight p-1.5 for data rows",
+    "gap": "gap-3 or gap-4",
+    "radius": "rounded-md",
+    "sidebar": "w-64 left-aligned, 19 dense sections, custom slim scrollbar.",
+    "kanban": "14 columns. Tight min-w-[280px] per column, snap scrolling, full height layout."
+  },
+  "components": {
+    "cards": {
+      "style": "Technical/Terminal",
+      "classes": "bg-zinc-950 border border-zinc-800 shadow-sm rounded-md",
+      "hover": "hover:border-zinc-700 transition-colors"
+    },
+    "tables": {
+      "header": "bg-zinc-900 text-zinc-400 text-xs uppercase tracking-widest font-mono border-b border-zinc-800 sticky top-0",
+      "row": "border-b border-zinc-800/50 hover:bg-zinc-800/50 transition-colors",
+      "cell": "p-2 text-sm text-zinc-300 font-mono",
+      "numbers": "text-right font-mono"
+    },
+    "badges": {
+      "classes": "px-2 py-0.5 rounded text-xs font-mono border uppercase tracking-wider font-semibold inline-flex items-center gap-1"
+    },
+    "buttons": {
+      "primary": "bg-sky-500 hover:bg-sky-600 text-white font-medium rounded px-3 py-1.5 transition-colors text-sm",
+      "secondary": "bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded px-3 py-1.5 transition-colors text-sm"
+    },
+    "timeline": {
+      "connector": "w-0.5 bg-zinc-800",
+      "node_active": "w-3 h-3 rounded-full bg-sky-500 ring-4 ring-sky-500/20",
+      "node_inactive": "w-3 h-3 rounded-full bg-zinc-700"
+    }
+  },
+  "motion": {
+    "alerts": "animate-pulse for Critical risk statuses",
+    "hover": "duration-150 ease-out",
+    "transitions": "transition-all"
+  },
+  "image_urls": {
+    "hero_login": {
+      "url": "https://images.pexels.com/photos/17720190/pexels-photo-17720190.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Semi truck at night on highway, used for login screen or landing page background",
+      "category": "background"
+    },
+    "map_background": {
+      "url": "https://images.unsplash.com/photo-1516738901171-8eb4fc13bd20?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NTZ8MHwxfHNlYXJjaHwxfHxjYXJnbyUyMGxvZ2lzdGljcyUyMG1hcHxlbnwwfHx8fDE3ODMwNjYzOTZ8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Cargo logistics map with pins, use for empty states or routing background overlays",
+      "category": "illustration"
+    }
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Use stroke-width 1.5 for a technical, precise feel. Size 16px (w-4 h-4) for dense rows, 14px for micro buttons, 20px for sidebar."
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the Dark Terminal / Mission Control aesthetic. Avoid pure black (#000000) - use zinc-950 (#09090B) for the deepest backgrounds.",
+    "Use 'Chivo' for headings, 'IBM Plex Sans' for body text, and 'IBM Plex Mono' for all numerical data, IDs, timestamps, and status badges. Include these from Google Fonts.",
+    "Implement the Operations Board Kanban with 14 columns: Booked->Assigned->Dispatched->Pickup Started->At Pickup->Loaded->In Transit->At Delivery->Delivered->Docs Pending->Invoice Pending->Payment Pending->Closed->At Risk. Ensure horizontal scrolling works smoothly.",
+    "The Load Execution Page must be a dense 'single pane of glass' with a timeline, quick actions, map, weather, and risks.",
+    "All numerical columns in tables must be right-aligned for clean readability.",
+    "Apply 'data-testid' to ALL interactive elements (buttons, inputs, tabs, row actions). Format MUST be 'role-action-descriptor'.",
+    "For critical alerts, use red borders with a subtle animate-pulse effect.",
+    "DO NOT use generic Shadcn Card padding (p-6) everywhere; override it to p-3 or p-4 for higher data density to match the terminal aesthetic.",
+    "Build the 19-item sidebar. Active states should use a subtle lighter zinc background.",
+    "The UI is a React application using Tailwind CSS. Ensure components are cleanly extracted and heavily reuse the defined typography classes.",
+    "DO NOT use Inter or Roboto anywhere in the UI."
+  ]
+}
