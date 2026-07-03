@@ -1,56 +1,64 @@
-import { useEffect } from "react";
-import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import axios from "axios";
-import { HOME } from "@/constants/testIds";
+import React from "react";
+import "./App.css";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { AuthProvider, useAuth } from "./lib/auth";
+import Shell from "./components/Shell";
+import Login from "./pages/Login";
+import Dashboard from "./pages/Dashboard";
+import OperationsBoard from "./pages/OperationsBoard";
+import Loads from "./pages/Loads";
+import LoadExecution from "./pages/LoadExecution";
+import Trucks from "./pages/Trucks";
+import Drivers from "./pages/Drivers";
+import Dispatch from "./pages/Dispatch";
+import InTransit from "./pages/InTransit";
+import WeatherRoad from "./pages/WeatherRoad";
+import FuelPlanner from "./pages/FuelPlanner";
+import Telematics from "./pages/Telematics";
+import Documents from "./pages/Documents";
+import Invoices from "./pages/Invoices";
+import TripPnL from "./pages/TripPnL";
+import { DriverScorecard, TruckScorecard } from "./pages/Scorecards";
+import Reports from "./pages/Reports";
+import AIAssistant from "./pages/AIAssistant";
+import Settings from "./pages/Settings";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+function Protected({ children }) {
+  const { user } = useAuth();
+  const loc = useLocation();
+  if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
+  return children;
+}
 
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
-
-  useEffect(() => {
-    helloWorldApi();
-  }, []);
-
+export default function App() {
   return (
-    <div>
-      <header className="App-header">
-        <a
-          data-testid={HOME.emergentLink}
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
-
-function App() {
-  return (
-    <div className="App">
+    <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<Protected><Shell /></Protected>}>
+            <Route index element={<Dashboard />} />
+            <Route path="board" element={<OperationsBoard />} />
+            <Route path="loads" element={<Loads />} />
+            <Route path="loads/:id" element={<LoadExecution />} />
+            <Route path="trucks" element={<Trucks />} />
+            <Route path="drivers" element={<Drivers />} />
+            <Route path="dispatch" element={<Dispatch />} />
+            <Route path="in-transit" element={<InTransit />} />
+            <Route path="weather" element={<WeatherRoad />} />
+            <Route path="fuel" element={<FuelPlanner />} />
+            <Route path="telematics" element={<Telematics />} />
+            <Route path="documents" element={<Documents />} />
+            <Route path="invoices" element={<Invoices />} />
+            <Route path="pnl" element={<TripPnL />} />
+            <Route path="driver-scorecard" element={<DriverScorecard />} />
+            <Route path="truck-scorecard" element={<TruckScorecard />} />
+            <Route path="reports" element={<Reports />} />
+            <Route path="ai" element={<AIAssistant />} />
+            <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>
       </BrowserRouter>
-    </div>
+    </AuthProvider>
   );
 }
-
-export default App;
