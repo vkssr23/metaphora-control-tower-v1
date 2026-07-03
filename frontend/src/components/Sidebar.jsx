@@ -21,7 +21,7 @@ const NAV = [
   { to: "/documents", label: "Documents", icon: FileText, roles: ["owner","dispatcher","finance","admin"] },
   { to: "/invoices", label: "Invoices", icon: Receipt, roles: ["owner","finance","admin"] },
   { to: "/pnl", label: "Trip P&L", icon: TrendingUp, roles: ["owner","finance","admin"] },
-  { to: "/driver-scorecard", label: "Driver Scorecard", icon: UserCheck, roles: ["owner","dispatcher","admin"] },
+  { to: "/driver-scorecard", label: "Driver Scorecard", icon: UserCheck, roles: ["owner","dispatcher","finance","admin"] },
   { to: "/truck-scorecard", label: "Truck Scorecard", icon: Gauge, roles: ["owner","admin"] },
   { to: "/reports", label: "Reports", icon: BarChart3, roles: ["owner","finance","admin"] },
   { to: "/ai", label: "AI Assistant", icon: Sparkles, roles: ["owner","dispatcher","finance","admin"] },
