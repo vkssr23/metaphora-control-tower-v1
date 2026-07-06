@@ -1,4 +1,4 @@
-"""AI Dispatch.RR - Trucking TMS Backend"""
+"""Metaphora Control Tower - Freight Operations Backend"""
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
@@ -20,7 +20,7 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = os.environ.get('JWT_SECRET', 'dev_secret')
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
-app = FastAPI(title="AI Dispatch.RR")
+app = FastAPI(title="Metaphora Control Tower")
 api = APIRouter(prefix="/api")
 
 # ============ UTILITIES ============
@@ -468,7 +468,7 @@ LOADS ({len(loads)}): {loads[:20]}
 TRUCKS ({len(trucks)}): {trucks[:15]}
 DRIVERS ({len(drivers)}): {drivers[:15]}
 INVOICES ({len(invoices)}): {invoices[:15]}
-Answer as the AI Dispatch.RR control tower assistant. Be crisp, use bullet points, cite Load IDs, driver names, and truck numbers."""
+Answer as the Metaphora Control Tower operations assistant for a USA trucking carrier. Be crisp, use bullet points, cite Load IDs, driver names, and truck numbers. Focus on decisions and next actions."""
 
     async def stream():
         try:
@@ -612,6 +612,10 @@ async def seed(force: bool = False):
     makes = ["Freightliner Cascadia","Peterbilt 579","Kenworth T680","Volvo VNL"]
     truck_docs = []
     for i in range(8):
+        # Varied expiry dates for realistic compliance data
+        ins_days = random.choice([-5, 15, 45, 120, 200, 300])
+        reg_days = random.choice([10, 25, 60, 150, 250])
+        insp_days = random.choice([-2, 20, 40, 90, 180])
         t = Truck(
             truck_number=f"TRK-{100+i}",
             vin=f"1HGBH41JXMN{100000+i}",
@@ -621,7 +625,9 @@ async def seed(force: bool = False):
             status=random.choice(["Available","Assigned","In Transit","Idle","At Pickup"]),
             current_location=random.choice(["Dallas TX","Atlanta GA","OKC OK","Denver CO","Nashville TN","Phoenix AZ","Chicago IL","Memphis TN"]),
             samsara_id=f"VEH{100+i}",
-            insurance_expiry="2026-12-31", registration_expiry="2026-08-15",
+            insurance_expiry=(datetime.now(timezone.utc)+timedelta(days=ins_days)).isoformat(),
+            registration_expiry=(datetime.now(timezone.utc)+timedelta(days=reg_days)).isoformat(),
+            maintenance_status=random.choice(["Good","Good","Warn","Good"]),
             weekly_revenue=round(random.uniform(4500, 9500),0),
             weekly_miles=round(random.uniform(2200, 3400),0),
             fuel_cost=round(random.uniform(900, 1600),0),
@@ -630,6 +636,7 @@ async def seed(force: bool = False):
             utilization=round(random.uniform(60, 95),0),
             profit_per_mile=round(random.uniform(0.35, 0.95),2),
         ).model_dump()
+        t["annual_inspection_expiry"] = (datetime.now(timezone.utc)+timedelta(days=insp_days)).isoformat()
         truck_docs.append(t)
     await db.trucks.insert_many(truck_docs)
 
@@ -638,6 +645,8 @@ async def seed(force: bool = False):
     last  = ["Johnson","Rodriguez","Smith","Brown","Davis","Miller","Wilson","Moore","Taylor","Anderson"]
     driver_docs = []
     for i in range(10):
+        cdl_days = random.choice([-3, 20, 45, 120, 220, 400])
+        med_days = random.choice([-1, 15, 35, 90, 180])
         d = Driver(
             name=f"{first[i]} {last[i]}",
             phone=f"+1-{random.randint(200,999)}-{random.randint(200,999)}-{random.randint(1000,9999)}",
@@ -658,6 +667,14 @@ async def seed(force: bool = False):
             safety_issues=random.randint(0,2),
             score=round(random.uniform(65,98),0),
         ).model_dump()
+        # Compliance fields
+        d["cdl_state"] = random.choice(["TX","CA","FL","GA","IL","OH","NC","AZ"])
+        d["cdl_expiry"] = (datetime.now(timezone.utc)+timedelta(days=cdl_days)).isoformat()
+        d["medical_expiry"] = (datetime.now(timezone.utc)+timedelta(days=med_days)).isoformat()
+        d["mvr_status"] = random.choice(["Clear","Clear","Clear","Review","Expired"])
+        d["clearinghouse_status"] = random.choice(["Clear","Clear","Pending","Clear","Issue"])
+        d["employment_verification"] = random.choice(["Complete","Complete","Pending"])
+        d["driver_type"] = random.choice(["Solo","Solo","Team"])
         driver_docs.append(d)
     await db.drivers.insert_many(driver_docs)
 
@@ -725,10 +742,219 @@ async def seed(force: bool = False):
 
     return {"ok": True, "loads": len(load_docs), "trucks": len(truck_docs), "drivers": len(driver_docs), "invoices": len(inv_docs)}
 
+# ============ COST ASSUMPTIONS ============
+DEFAULT_ASSUMPTIONS = {
+    "id": "default",
+    "fuel_price": 3.85, "mpg": 6.5,
+    "driver_pay_solo_cpm": 0.60, "driver_pay_team_cpm": 0.90,
+    "insurance_per_week": 350, "rental_per_week": 400,
+    "factoring_fee_pct": 3.0, "default_toll": 60,
+    "target_margin_pct": 20, "min_rpm": 1.85, "min_net_profit": 400,
+}
+
+@api.get("/assumptions")
+async def get_assumptions():
+    doc = await db.assumptions.find_one({"id": "default"}, {"_id": 0})
+    if not doc:
+        await db.assumptions.insert_one(DEFAULT_ASSUMPTIONS.copy())
+        return DEFAULT_ASSUMPTIONS
+    return doc
+
+@api.put("/assumptions")
+async def update_assumptions(data: dict):
+    data["id"] = "default"
+    await db.assumptions.update_one({"id": "default"}, {"$set": data}, upsert=True)
+    return {"ok": True}
+
+# ============ LOAD DECISION ENGINE ============
+class LoadAnalysisIn(BaseModel):
+    offered_rate: float
+    loaded_miles: float
+    deadhead_miles: float = 0
+    fuel_price: Optional[float] = None
+    mpg: Optional[float] = None
+    driver_type: str = "Solo"   # Solo | Team
+    driver_pay_cpm: Optional[float] = None
+    tolls: Optional[float] = None
+    pickup_city: str = ""
+    delivery_city: str = ""
+    pickup_datetime: str = ""
+    delivery_datetime: str = ""
+    broker: str = ""
+    commodity: str = ""
+    weight: float = 0
+
+@api.post("/loads/analyze")
+async def analyze_load(data: LoadAnalysisIn):
+    a = await db.assumptions.find_one({"id": "default"}, {"_id": 0}) or DEFAULT_ASSUMPTIONS
+    fuel_price = data.fuel_price if data.fuel_price is not None else a["fuel_price"]
+    mpg = data.mpg if data.mpg is not None else a["mpg"]
+    driver_cpm = data.driver_pay_cpm if data.driver_pay_cpm is not None else (a["driver_pay_team_cpm"] if data.driver_type == "Team" else a["driver_pay_solo_cpm"])
+    tolls = data.tolls if data.tolls is not None else a["default_toll"]
+
+    total_miles = data.loaded_miles + data.deadhead_miles
+    if total_miles <= 0:
+        raise HTTPException(400, "Miles must be > 0")
+
+    rpm = round(data.offered_rate / total_miles, 2)
+    fuel_gallons = round(total_miles / mpg, 1) if mpg > 0 else 0
+    fuel_cost = round(fuel_gallons * fuel_price, 2)
+    driver_pay = round(total_miles * driver_cpm, 2)
+    insurance = round(a["insurance_per_week"] / 5, 2)   # amortize per trip (~5 trips/wk)
+    rental = round(a["rental_per_week"] / 5, 2)
+    factoring = round(data.offered_rate * a["factoring_fee_pct"] / 100, 2)
+
+    trip_cost = fuel_cost + driver_pay + tolls + insurance + rental + factoring
+    net_profit = round(data.offered_rate - trip_cost, 2)
+    margin_pct = round((net_profit / data.offered_rate) * 100, 1) if data.offered_rate > 0 else 0
+    profit_per_mile = round(net_profit / total_miles, 2) if total_miles > 0 else 0
+
+    # Decision logic
+    reasons = []
+    risk = "Green"
+    decision = "Book"
+
+    if net_profit < 0:
+        decision = "Reject"; risk = "Red"
+        reasons.append(f"Negative net profit of ${net_profit}")
+    elif rpm < a["min_rpm"] * 0.8:
+        decision = "Reject"; risk = "Red"
+        reasons.append(f"RPM ${rpm}/mi is critically below floor ${a['min_rpm']}/mi")
+    elif net_profit < a["min_net_profit"] or margin_pct < a["target_margin_pct"] * 0.6:
+        decision = "Negotiate"; risk = "Yellow"
+        reasons.append(f"Net profit ${net_profit} below minimum ${a['min_net_profit']}" if net_profit < a["min_net_profit"] else f"Margin {margin_pct}% below target {a['target_margin_pct']}%")
+    elif rpm < a["min_rpm"]:
+        decision = "Negotiate"; risk = "Yellow"
+        reasons.append(f"RPM ${rpm}/mi below minimum ${a['min_rpm']}/mi")
+    else:
+        reasons.append(f"Healthy margin {margin_pct}% at ${rpm}/mi")
+
+    # Deadhead flag
+    deadhead_pct = (data.deadhead_miles / total_miles) * 100 if total_miles else 0
+    if deadhead_pct > 25:
+        reasons.append(f"High deadhead {deadhead_pct:.0f}% of total miles")
+        if risk == "Green": risk = "Yellow"
+
+    # Target negotiation rate: bring margin to target
+    target_margin = a["target_margin_pct"] / 100
+    target_rate = round(trip_cost / (1 - target_margin), 0)
+    # Minimum acceptable rate = trip_cost * (1 + 8% margin)
+    min_rate = round(trip_cost * 1.08, 0)
+
+    # Load score 0-100
+    score = 50 + (margin_pct - a["target_margin_pct"]) * 1.5
+    score = max(0, min(100, round(score, 0)))
+
+    summary = f"Decision: {decision}. {'; '.join(reasons)}. Target rate ${target_rate:,.0f}, minimum ${min_rate:,.0f}."
+
+    return {
+        "total_miles": total_miles,
+        "rpm": rpm,
+        "fuel_gallons": fuel_gallons,
+        "fuel_cost": fuel_cost,
+        "driver_pay": driver_pay,
+        "tolls": tolls,
+        "insurance": insurance,
+        "rental": rental,
+        "factoring": factoring,
+        "trip_cost": round(trip_cost, 2),
+        "net_profit": net_profit,
+        "margin_pct": margin_pct,
+        "profit_per_mile": profit_per_mile,
+        "deadhead_pct": round(deadhead_pct, 1),
+        "decision": decision,
+        "risk": risk,
+        "score": int(score),
+        "target_rate": target_rate,
+        "min_acceptable_rate": min_rate,
+        "reasoning": summary,
+        "reasons": reasons,
+    }
+
+# ============ COMPLIANCE ============
+def _days_until(iso_str):
+    if not iso_str: return None
+    try:
+        d = datetime.fromisoformat(iso_str.replace("Z","+00:00")) if isinstance(iso_str,str) else iso_str
+        if d.tzinfo is None: d = d.replace(tzinfo=timezone.utc)
+        return (d - datetime.now(timezone.utc)).days
+    except Exception:
+        return None
+
+@api.get("/compliance")
+async def compliance_overview():
+    drivers = await db.drivers.find({}, {"_id": 0}).to_list(1000)
+    trucks = await db.trucks.find({}, {"_id": 0}).to_list(1000)
+    items = []
+
+    for d in drivers:
+        blockers = []; warns = []
+        cdl_days = _days_until(d.get("cdl_expiry"))
+        med_days = _days_until(d.get("medical_expiry"))
+        if cdl_days is not None and cdl_days < 0: blockers.append(f"CDL expired {abs(cdl_days)}d ago")
+        elif cdl_days is not None and cdl_days < 30: warns.append(f"CDL expires in {cdl_days}d")
+        if med_days is not None and med_days < 0: blockers.append(f"Medical card expired {abs(med_days)}d ago")
+        elif med_days is not None and med_days < 30: warns.append(f"Medical expires in {med_days}d")
+        if d.get("clearinghouse_status") == "Issue": blockers.append("Clearinghouse issue")
+        elif d.get("clearinghouse_status") == "Pending": warns.append("Clearinghouse pending")
+        if d.get("mvr_status") == "Expired": blockers.append("MVR expired")
+        elif d.get("mvr_status") == "Review": warns.append("MVR review")
+        if d.get("employment_verification") == "Pending": warns.append("Employment verification pending")
+
+        status = "Red" if blockers else ("Yellow" if warns else "Green")
+        items.append({
+            "entity_type": "Driver", "entity_id": d["id"], "entity_name": d["name"],
+            "status": status, "blockers": blockers, "warnings": warns,
+            "dispatch_allowed": not blockers,
+            "details": {
+                "cdl_expiry": d.get("cdl_expiry"), "cdl_days": cdl_days,
+                "medical_expiry": d.get("medical_expiry"), "medical_days": med_days,
+                "mvr_status": d.get("mvr_status"),
+                "clearinghouse_status": d.get("clearinghouse_status"),
+                "employment_verification": d.get("employment_verification"),
+            }
+        })
+
+    for t in trucks:
+        blockers = []; warns = []
+        ins_days = _days_until(t.get("insurance_expiry"))
+        reg_days = _days_until(t.get("registration_expiry"))
+        insp_days = _days_until(t.get("annual_inspection_expiry"))
+        if ins_days is not None and ins_days < 0: blockers.append(f"Insurance expired {abs(ins_days)}d ago")
+        elif ins_days is not None and ins_days < 30: warns.append(f"Insurance expires in {ins_days}d")
+        if reg_days is not None and reg_days < 0: blockers.append(f"Registration expired {abs(reg_days)}d ago")
+        elif reg_days is not None and reg_days < 30: warns.append(f"Registration expires in {reg_days}d")
+        if insp_days is not None and insp_days < 0: blockers.append(f"Annual inspection expired {abs(insp_days)}d ago")
+        elif insp_days is not None and insp_days < 45: warns.append(f"Annual inspection expires in {insp_days}d")
+        if t.get("maintenance_status") == "Bad": blockers.append("Maintenance blocker")
+        elif t.get("maintenance_status") == "Warn": warns.append("Maintenance attention")
+
+        status = "Red" if blockers else ("Yellow" if warns else "Green")
+        items.append({
+            "entity_type": "Truck", "entity_id": t["id"], "entity_name": t["truck_number"],
+            "status": status, "blockers": blockers, "warnings": warns,
+            "dispatch_allowed": not blockers,
+            "details": {
+                "insurance_expiry": t.get("insurance_expiry"), "insurance_days": ins_days,
+                "registration_expiry": t.get("registration_expiry"), "registration_days": reg_days,
+                "inspection_expiry": t.get("annual_inspection_expiry"), "inspection_days": insp_days,
+                "maintenance_status": t.get("maintenance_status"),
+            }
+        })
+
+    summary = {
+        "total": len(items),
+        "green": sum(1 for i in items if i["status"]=="Green"),
+        "yellow": sum(1 for i in items if i["status"]=="Yellow"),
+        "red": sum(1 for i in items if i["status"]=="Red"),
+        "dispatch_blocked": sum(1 for i in items if not i["dispatch_allowed"]),
+    }
+    return {"summary": summary, "items": items}
+
 # ============ HEALTH ============
 @api.get("/")
 async def root():
-    return {"app": "AI Dispatch.RR", "status": "operational", "time": now_iso()}
+    return {"app": "Metaphora Control Tower", "status": "operational", "time": now_iso()}
 
 app.include_router(api)
 app.add_middleware(CORSMiddleware, allow_credentials=True,

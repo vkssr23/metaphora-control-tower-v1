@@ -16,7 +16,7 @@ const SUGGESTIONS = [
 
 export default function AIAssistant() {
   const [messages, setMessages] = useState([
-    { role:"assistant", text:"I'm your Dispatch.RR assistant. Ask me about at-risk loads, driver performance, invoices, profitability, or ask for today's owner report." }
+    { role:"assistant", text:"I'm your Metaphora Control Tower assistant. Ask me about at-risk loads, driver performance, invoices, profitability, compliance blockers, or ask for today's owner report." }
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
