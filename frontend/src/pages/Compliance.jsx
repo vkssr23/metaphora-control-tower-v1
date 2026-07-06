@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps -- intentional mount-only effects */
 import React, { useEffect, useState, useMemo } from "react";
 import Topbar from "../components/Topbar";
 import api from "../lib/api";

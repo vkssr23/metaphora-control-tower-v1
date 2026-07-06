@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Columns3, Package, TruckIcon, Users, Radio, Route,
@@ -34,6 +34,7 @@ const NAV = [
 export default function Sidebar() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
+  const items = useMemo(() => NAV.filter(n => !user?.role || n.roles.includes(user.role)), [user?.role]);
 
   return (
     <aside className="w-64 shrink-0 border-r flex flex-col h-screen sticky top-0" style={{background:"var(--surface)", borderColor:"var(--border)"}}>
@@ -47,7 +48,7 @@ export default function Sidebar() {
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5" data-testid="sidebar-nav">
-        {NAV.filter(n => !user?.role || n.roles.includes(user.role)).map((n) => (
+        {items.map((n) => (
           <NavLink
             key={n.to}
             to={n.to}

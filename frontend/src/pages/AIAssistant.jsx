@@ -16,7 +16,7 @@ const SUGGESTIONS = [
 
 export default function AIAssistant() {
   const [messages, setMessages] = useState([
-    { role:"assistant", text:"I'm your Metaphora Control Tower assistant. Ask me about at-risk loads, driver performance, invoices, profitability, compliance blockers, or ask for today's owner report." }
+    { id: "welcome", role:"assistant", text:"I'm your Metaphora Control Tower assistant. Ask me about at-risk loads, driver performance, invoices, profitability, compliance blockers, or ask for today's owner report." }
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -28,7 +28,7 @@ export default function AIAssistant() {
     const q = text ?? input;
     if (!q.trim() || busy) return;
     setInput("");
-    setMessages(m => [...m, { role:"user", text: q }, { role:"assistant", text: "" }]);
+    setMessages(m => [...m, { id: `u-${Date.now()}`, role:"user", text: q }, { id: `a-${Date.now()}`, role:"assistant", text: "" }]);
     setBusy(true);
     try {
       const res = await fetch(`${API}/ai/chat`, {
@@ -44,14 +44,14 @@ export default function AIAssistant() {
         acc += decoder.decode(value, { stream: true });
         setMessages(m => {
           const copy = [...m];
-          copy[copy.length-1] = { role:"assistant", text: acc };
+          copy[copy.length-1] = { ...copy[copy.length-1], text: acc };
           return copy;
         });
       }
     } catch (e) {
       setMessages(m => {
         const copy = [...m];
-        copy[copy.length-1] = { role:"assistant", text: "[Connection error] "+e.message };
+        copy[copy.length-1] = { ...copy[copy.length-1], text: "[Connection error] "+e.message };
         return copy;
       });
     } finally { setBusy(false); }
@@ -61,8 +61,8 @@ export default function AIAssistant() {
     <div className="flex flex-col h-screen">
       <Topbar title="AI Assistant" subtitle="Claude Sonnet · Live Data" />
       <div className="flex-1 overflow-y-auto p-6 space-y-4 max-w-4xl mx-auto w-full">
-        {messages.map((m,i)=>(
-          <div key={i} className={`flex ${m.role==="user"?"justify-end":"justify-start"}`} data-testid={`ai-msg-${i}`}>
+        {messages.map((m)=>(
+          <div key={m.id} className={`flex ${m.role==="user"?"justify-end":"justify-start"}`} data-testid={`ai-msg-${m.id}`}>
             <div className={`${m.role==="user"?"bg-sky-500/20 border-sky-500/40":"bg-zinc-900 border-zinc-800"} border rounded-lg px-4 py-3 max-w-[80%] text-sm`}>
               {m.role==="assistant" && <div className="flex items-center gap-1.5 mb-1"><Sparkles className="w-3 h-3 text-sky-400" /><span className="text-[10px] font-mono uppercase text-sky-400 tracking-widest">Dispatch AI</span></div>}
               <div className="whitespace-pre-wrap font-mono text-[13px] leading-relaxed">{m.text || (busy && i===messages.length-1 ? "…" : "")}</div>

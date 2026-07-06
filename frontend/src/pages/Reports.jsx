@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+/* eslint-disable react-hooks/exhaustive-deps -- intentional mount-only effects */
+import React, { useEffect, useState, useMemo } from "react";
 import Topbar from "../components/Topbar";
 import api from "../lib/api";
 import { Money, Num } from "../components/Badges";
@@ -19,11 +20,14 @@ export default function Reports() {
     api.get("/invoices").then(r=>setInvs(r.data));
   },[]);
 
-  if (!stats) return <div className="p-6 text-zinc-500">Loading…</div>;
+  const highRisk = useMemo(() => loads.filter(l=>l.risk==="High"||l.risk==="Critical").slice(0,5), [loads]);
+  const missingPod = useMemo(() => loads.filter(l=>l.stage==="Delivered" && l.pod_status==="Pending").slice(0,5), [loads]);
+  const lossLoads = useMemo(() => loads.map(l=>({...l, net: l.rate - (l.fuel_cost+l.tolls+l.lumper+l.driver_pay+l.factoring_fee+l.other_expenses)})).filter(l=>l.net<0), [loads]);
+  const topDrivers = useMemo(() => [...drivers].sort((a,b)=>b.score-a.score).slice(0,5), [drivers]);
+  const topTrucks  = useMemo(() => [...trucks].sort((a,b)=>b.profit_per_mile-a.profit_per_mile).slice(0,5), [trucks]);
+  const delayed    = useMemo(() => loads.filter(l=>l.risk==="Critical").slice(0,10), [loads]);
 
-  const highRisk = loads.filter(l=>l.risk==="High"||l.risk==="Critical").slice(0,5);
-  const missingPod = loads.filter(l=>l.stage==="Delivered" && l.pod_status==="Pending").slice(0,5);
-  const lossLoads = loads.map(l=>({...l, net: l.rate - (l.fuel_cost+l.tolls+l.lumper+l.driver_pay+l.factoring_fee+l.other_expenses)})).filter(l=>l.net<0);
+  if (!stats) return <div className="p-6 text-zinc-500">Loading…</div>;
 
   const Section = ({title, children}) => (
     <div className="terminal-card p-4">
@@ -91,7 +95,7 @@ export default function Reports() {
 
         <Section title="Top Drivers (Score)">
           <div className="space-y-1 text-xs font-mono">
-            {drivers.sort((a,b)=>b.score-a.score).slice(0,5).map(d=>(
+            {topDrivers.map(d=>(
               <div key={d.id} className="flex justify-between"><span>{d.name}</span><span className="text-emerald-400">{d.score}</span></div>
             ))}
           </div>
@@ -99,7 +103,7 @@ export default function Reports() {
 
         <Section title="Top Trucks (PPM)">
           <div className="space-y-1 text-xs font-mono">
-            {trucks.sort((a,b)=>b.profit_per_mile-a.profit_per_mile).slice(0,5).map(t=>(
+            {topTrucks.map(t=>(
               <div key={t.id} className="flex justify-between"><span>{t.truck_number}</span><span className="text-emerald-400">${t.profit_per_mile}/mi</span></div>
             ))}
           </div>
@@ -116,7 +120,7 @@ export default function Reports() {
 
         <Section title="Delayed Loads">
           <div className="space-y-1 text-xs font-mono">
-            {loads.filter(l=>l.risk==="Critical").slice(0,10).map(l=>(
+            {delayed.map(l=>(
               <div key={l.id} className="flex justify-between"><span>{l.id} · {l.customer}</span><span className="text-red-400">Critical</span></div>
             ))}
           </div>
