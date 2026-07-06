@@ -61,7 +61,7 @@ export default function AIAssistant() {
     <div className="flex flex-col h-screen">
       <Topbar title="AI Assistant" subtitle="Claude Sonnet · Live Data" />
       <div className="flex-1 overflow-y-auto p-6 space-y-4 max-w-4xl mx-auto w-full">
-        {messages.map((m)=>(
+        {messages.map((m, i)=>(
           <div key={m.id} className={`flex ${m.role==="user"?"justify-end":"justify-start"}`} data-testid={`ai-msg-${m.id}`}>
             <div className={`${m.role==="user"?"bg-sky-500/20 border-sky-500/40":"bg-zinc-900 border-zinc-800"} border rounded-lg px-4 py-3 max-w-[80%] text-sm`}>
               {m.role==="assistant" && <div className="flex items-center gap-1.5 mb-1"><Sparkles className="w-3 h-3 text-sky-400" /><span className="text-[10px] font-mono uppercase text-sky-400 tracking-widest">Dispatch AI</span></div>}

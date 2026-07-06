@@ -1,0 +1,27 @@
+{
+  "summary": "Retest of AIAssistant.jsx ReferenceError fix from iteration_7. Verified: fix in place (map callback restored to (m, i) => on line 64, key still uses m.id). E2E test on /ai: signed up fresh dispatcher, welcome bubble ai-msg-welcome renders, sent 3 back-to-back queries (Top drivers, Any pending invoices, Missing PODs). Result: 7 total bubbles with unique stable IDs (welcome + 3 u-<ts> + 3 a-<ts>), streaming assistant responses arrived correctly (real Claude/live data output, not fallback), 0 ReferenceErrors, 0 React key warnings, 0 pageerrors captured. Regression sweep of /, /reports, /compliance, /analyze, /board — all routes load cleanly with no console errors.",
+  "tested_scope": ["frontend"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed_frontend": [
+    "Signup flow (dispatcher role default) -> auto-login to /",
+    "/ai loads with welcome bubble data-testid=ai-msg-welcome",
+    "ai-input + ai-send-btn functional; 3 sequential sends produced 7 unique-keyed ai-msg-* bubbles",
+    "AI streaming SSE response renders inside assistant bubble (real markdown output, not fallback)",
+    "No ReferenceError: i is not defined — the crash from iteration_7 is fully resolved",
+    "Regression: /, /reports, /compliance, /analyze, /board load without errors"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "AIAssistant.jsx line 68 still uses index i to gate the '…' placeholder; this is functionally fine now, but the placeholder is redundant because the streaming loop already mutates the last assistant bubble's text on the first chunk. Consider simplifying to `m.role==='assistant' && !m.text && busy ? '…' : ''` to remove the i dependency entirely and future-proof against similar refactors.",
+    "Emergent badge (#emergent-badge) intercepts pointer events over ai-send-btn at 1440x900; only affects Playwright without force=True. Not a user-facing bug but worth noting for future automated tests."
+  ],
+  "updated_files": [],
+  "success_rate": {"frontend": "100% (bug fix verified + 5/5 regression routes)"},
+  "test_credentials": "Signup on the fly: qa_<epoch_ms>@test.com / testpass123 (dispatcher role)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iteration_7 crash bug in AIAssistant.jsx is fully fixed. All ai-msg-* bubbles carry unique m.id keys. Backend AI streaming is producing real live-data output (not fallback) as of this run. If further changes are made to AIAssistant, use wait_for_function on !ai-send-btn.disabled between sends and hide #emergent-badge before clicking ai-send-btn.",
+  "rca_of_the_issue": "Fix in iteration_8 code: restored `.map((m, i) =>` signature while keeping `key={m.id}` — resolves the ReferenceError without regressing the stable-key improvement."
+}
