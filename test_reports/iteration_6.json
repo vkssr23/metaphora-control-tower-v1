@@ -1,0 +1,43 @@
+{
+  "summary": "Focused auth-change regression: verified demo logins are removed and self-signup flow works end-to-end. Backend pytest 7/7 passed. Frontend Playwright covered Login page structure, tab toggle, no demo/quick-signin, signup validation (empty + short password), signup happy path, redirect to dashboard, logout, and re-login with created credentials — all passed.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed_backend": [
+    "POST /api/auth/login with owner@dispatch.com/owner123 -> 401 (demo user deleted)",
+    "POST /api/auth/login with dispatcher@dispatch.com/dispatch123 -> 401",
+    "POST /api/auth/login with finance@dispatch.com/finance123 -> 401",
+    "POST /api/auth/signup {name,email,password,role:dispatcher} -> 200 with {token, user} (no password field)",
+    "POST /api/auth/login immediately after signup -> 200 with token",
+    "POST /api/auth/signup with duplicate email -> 400 'Email exists'",
+    "POST /api/auth/login with wrong password -> 401"
+  ],
+  "passed_frontend": [
+    "/login renders with tab-login and tab-signup, NO 'Quick sign-in', NO OWNER/DISPATCH/FINANCE buttons, NO demo emails",
+    "login-email and login-password inputs start empty (no pre-fill)",
+    "Clicking tab-signup reveals signup-name, signup-email, signup-password, signup-role, signup-submit-btn",
+    "Empty signup submission blocked with error toast",
+    "Password < 6 chars blocked with error toast",
+    "Valid signup (role=owner) succeeds and redirects to dashboard (/)",
+    "Dashboard renders with 20 sidebar items (Executive Dashboard, Load Market Analysis, Dispatch Board, Loads, Trucks, Drivers, Compliance, Dispatch Queue, In-Transit, Weather & Roads, Fuel Stops, Telematics, Documents, Invoices, Profitability, Driver Scorecard, Truck Scorecard, Reports, AI Assistant, Settings)",
+    "sidebar-logout-btn logs user out back to /login",
+    "Re-login via login-email/login-password/login-submit-btn with created credentials succeeds and returns to dashboard"
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_auth_signup.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py still ~960 lines - previous iteration's split recommendation stands but non-blocking.",
+    "Signup accepts any email format via Pydantic default; consider EmailStr for stricter validation (currently accepts anything Pydantic allows).",
+    "Bcrypt hash on signup is synchronous inside async handler - acceptable for MVP volume; move to executor for high concurrency."
+  ],
+  "updated_files": ["/app/backend/tests/test_auth_signup.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "success_rate": {"backend": "100% (7/7)", "frontend": "100% (all checks passed)"},
+  "test_credentials": "Created on-the-fly per test run using timestamp-suffixed emails, e.g. qa_<epoch_ms>@example.com / testpass123 / role varies. No pre-seeded accounts exist.",
+  "seed_data_creation": "None. Auth suite creates its own user per run; no cleanup needed as emails are unique.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Demo users (owner@/dispatcher@/finance@dispatch.com) are permanently deleted. Every test must self-register via POST /api/auth/signup or the Create Account tab on /login. Use a unique email (timestamp suffix) to avoid 400 'Email exists'. Backend endpoints unchanged from iteration_5; only Login UI was rebuilt."
+}

@@ -595,18 +595,7 @@ async def seed(force: bool = False):
     await db.drivers.delete_many({}); await db.activity.delete_many({})
     await db.invoices.delete_many({}); await db.documents.delete_many({})
 
-    # Users
-    if await db.users.count_documents({}) == 0:
-        users = [
-            {"email":"owner@dispatch.com","password":"owner123","name":"John Owner","role":"owner"},
-            {"email":"dispatcher@dispatch.com","password":"dispatch123","name":"Maria Dispatch","role":"dispatcher"},
-            {"email":"finance@dispatch.com","password":"finance123","name":"Sam Finance","role":"finance"},
-        ]
-        for u in users:
-            doc = {"id": new_id("U"), "email":u["email"], "name":u["name"], "role":u["role"],
-                   "password": bcrypt.hashpw(u["password"].encode(), bcrypt.gensalt()).decode(),
-                   "created_at": now_iso()}
-            await db.users.insert_one(doc)
+    # Users are NOT pre-seeded. Every user must self-register via /api/auth/signup.
 
     # Trucks
     makes = ["Freightliner Cascadia","Peterbilt 579","Kenworth T680","Volvo VNL"]

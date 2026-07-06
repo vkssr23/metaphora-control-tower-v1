@@ -21,13 +21,24 @@ export function AuthProvider({ children }) {
     } finally { setLoading(false); }
   };
 
+  const signup = async (payload) => {
+    setLoading(true);
+    try {
+      const { data } = await api.post("/auth/signup", payload);
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("user", JSON.stringify(data.user));
+      setUser(data.user);
+      return data.user;
+    } finally { setLoading(false); }
+  };
+
   const logout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     setUser(null);
   };
 
-  return <AuthCtx.Provider value={{ user, login, logout, loading }}>{children}</AuthCtx.Provider>;
+  return <AuthCtx.Provider value={{ user, login, signup, logout, loading }}>{children}</AuthCtx.Provider>;
 }
 
 export const useAuth = () => useContext(AuthCtx);
