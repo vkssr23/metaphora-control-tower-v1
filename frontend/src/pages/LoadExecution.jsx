@@ -68,15 +68,26 @@ export default function LoadExecution() {
   if (!load) return <div className="p-6 text-zinc-500">Loading…</div>;
 
   const changeStage = async (stage) => {
-    await api.post(`/loads/${id}/stage`, { stage, updated_by: "Dispatcher", notes: "" });
-    toast.success(`Stage → ${stage}`);
-    refresh();
+    try {
+      await api.post(`/loads/${id}/stage`, { stage, notes: "" });
+      toast.success(`Stage → ${stage}`);
+      refresh();
+    } catch (error) {
+      toast.error(error?.response?.status === 409 ? error.response.data.detail : "Stage update failed");
+    }
   };
 
   const assignDriverTruck = async (driver_id, truck_id) => {
-    const updates = { driver_id, truck_id };
-    if (load.stage === "Booked") updates.stage = "Assigned";
-    await api.put(`/loads/${id}`, updates);
+    await api.put(`/loads/${id}`, { driver_id, truck_id });
+    if (load.stage === "Booked") {
+      try {
+        await api.post(`/loads/${id}/stage`, { stage: "Assigned", notes: "Assigned driver and truck" });
+      } catch (error) {
+        toast.error(error?.response?.status === 409 ? `Assignments saved; ${error.response.data.detail}` : "Assignments saved; stage update failed");
+        refresh();
+        return;
+      }
+    }
     toast.success("Assigned");
     refresh();
   };
@@ -102,7 +113,7 @@ export default function LoadExecution() {
   };
 
   const generateAlert = async (type, msg) => {
-    const { data } = await api.post("/alerts/generate", { load_id: id, alert_type: type, message: msg || `Auto-generated ${type} alert.`, dispatcher: "Dispatcher" });
+    const { data } = await api.post("/alerts/generate", { load_id: id, alert_type: type, message: msg || `Auto-generated ${type} alert.` });
     setAlertMsg(data.message);
     toast.success("Driver alert generated");
     refresh();
@@ -111,7 +122,7 @@ export default function LoadExecution() {
   const uploadDoc = async (doc_type) => {
     const filename = prompt(`Filename for ${doc_type}:`, `${doc_type}_${id}.pdf`);
     if (!filename) return;
-    await api.post("/documents", { load_id: id, doc_type, filename, uploaded_by: "Dispatcher", url: `mock://${filename}` });
+    await api.post("/documents", { load_id: id, doc_type, filename, url: `mock://${filename}` });
     toast.success("Document logged");
     refresh();
   };

@@ -12,6 +12,14 @@ from datetime import datetime, timezone, timedelta
 from app.config import Settings, force_seed_allowed
 from app.permissions import require_capability, require_owner
 from app.security import authenticated_user_dependency, create_token, public_user
+from app.domain.load_transitions import transition_allowed
+from app.schemas import (
+    AiChatRequest, AssumptionUpdate, DocumentCreate, DriverAlertRequest, DriverCreate,
+    DriverUpdate, InvoiceCreate, InvoiceUpdate, LoadAnalysisRequest, LoadCreate,
+    LoadIdRequest, LoadStage, LoadUpdate, RouteCalculationRequest,
+    SamsaraVehicleRequest, StageChange as SafeStageChange, TruckCreate, TruckUpdate,
+    WeatherCheckRequest,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -37,6 +45,15 @@ def clean_doc(d):
     if d and '_id' in d:
         d.pop('_id', None)
     return d
+
+async def safe_db(awaitable, operation):
+    try:
+        return await awaitable
+    except HTTPException:
+        raise
+    except Exception:
+        logging.error("Database operation failed during %s", operation)
+        raise HTTPException(500, "Database operation failed")
 
 # ============ AUTH ============
 class LoginIn(BaseModel):
@@ -125,7 +142,7 @@ async def me(user=Depends(get_current_user)):
     return user
 
 # ============ MODELS ============
-class Truck(BaseModel):
+class InternalSeedTruck(BaseModel):
     id: str = Field(default_factory=lambda: new_id("T"))
     truck_number: str
     vin: str = ""
@@ -150,7 +167,7 @@ class Truck(BaseModel):
     profit_per_mile: float = 0
     created_at: str = Field(default_factory=now_iso)
 
-class Driver(BaseModel):
+class InternalSeedDriver(BaseModel):
     id: str = Field(default_factory=lambda: new_id("D"))
     name: str
     phone: str = ""
@@ -179,7 +196,7 @@ STAGES = [
     "Docs Pending", "Invoice Pending", "Payment Pending", "Closed", "Exception"
 ]
 
-class Load(BaseModel):
+class InternalSeedLoad(BaseModel):
     id: str = Field(default_factory=lambda: new_id("L"))
     customer: str
     broker: str = ""
@@ -225,19 +242,25 @@ async def list_trucks():
     return docs
 
 @api.post("/trucks")
-async def create_truck(t: Truck, user=Depends(safety_write)):
-    d = t.model_dump()
-    await db.trucks.insert_one(d); clean_doc(d)
+async def create_truck(t: TruckCreate, user=Depends(safety_write)):
+    d = {"id": new_id("T"), **t.model_dump(mode="json"), "profit_per_mile": 0, "created_at": now_iso()}
+    await safe_db(db.trucks.insert_one(d), "truck create"); clean_doc(d)
     return d
 
 @api.put("/trucks/{tid}")
-async def update_truck(tid: str, data: dict, user=Depends(safety_write)):
-    await db.trucks.update_one({"id": tid}, {"$set": data})
+async def update_truck(tid: str, data: TruckUpdate, user=Depends(safety_write)):
+    if not await safe_db(db.trucks.find_one({"id": tid}, {"_id": 0}), "truck lookup"): raise HTTPException(404, "Not found")
+    updates = data.model_dump(mode="json", exclude_unset=True)
+    updates["updated_at"] = now_iso()
+    result = await safe_db(db.trucks.update_one({"id": tid}, {"$set": updates}), "truck update")
+    if not result.matched_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 @api.delete("/trucks/{tid}")
 async def delete_truck(tid: str, user=Depends(safety_write)):
-    await db.trucks.delete_one({"id": tid}); return {"ok": True}
+    result = await safe_db(db.trucks.delete_one({"id": tid}), "truck delete")
+    if not result.deleted_count: raise HTTPException(404, "Not found")
+    return {"ok": True}
 
 # ============ DRIVERS ============
 @api.get("/drivers")
@@ -245,17 +268,23 @@ async def list_drivers():
     return await db.drivers.find({}, {"_id": 0}).to_list(1000)
 
 @api.post("/drivers")
-async def create_driver(d: Driver, user=Depends(safety_write)):
-    doc = d.model_dump(); await db.drivers.insert_one(doc); clean_doc(doc)
+async def create_driver(d: DriverCreate, user=Depends(safety_write)):
+    doc = {"id": new_id("D"), **d.model_dump(mode="json"), "created_at": now_iso()}; await safe_db(db.drivers.insert_one(doc), "driver create"); clean_doc(doc)
     return doc
 
 @api.put("/drivers/{did}")
-async def update_driver(did: str, data: dict, user=Depends(safety_write)):
-    await db.drivers.update_one({"id": did}, {"$set": data}); return {"ok": True}
+async def update_driver(did: str, data: DriverUpdate, user=Depends(safety_write)):
+    if not await safe_db(db.drivers.find_one({"id": did}, {"_id": 0}), "driver lookup"): raise HTTPException(404, "Not found")
+    updates = data.model_dump(mode="json", exclude_unset=True); updates["updated_at"] = now_iso()
+    result = await safe_db(db.drivers.update_one({"id": did}, {"$set": updates}), "driver update")
+    if not result.matched_count: raise HTTPException(404, "Not found")
+    return {"ok": True}
 
 @api.delete("/drivers/{did}")
 async def delete_driver(did: str, user=Depends(safety_write)):
-    await db.drivers.delete_one({"id": did}); return {"ok": True}
+    result = await safe_db(db.drivers.delete_one({"id": did}), "driver delete")
+    if not result.deleted_count: raise HTTPException(404, "Not found")
+    return {"ok": True}
 
 # ============ LOADS ============
 @api.get("/loads")
@@ -269,47 +298,67 @@ async def get_load(lid: str):
     return l
 
 @api.post("/loads")
-async def create_load(l: Load, user=Depends(operational_write)):
-    d = l.model_dump()
-    if d["miles"] and d["rate"]:
-        d["rpm"] = round(d["rate"] / d["miles"], 2)
-    await db.loads.insert_one(d); clean_doc(d)
-    await log_activity(d["id"], "Load Created", "", "Booked", user.get("name", user["id"]), "Load created")
+async def create_load(l: LoadCreate, user=Depends(operational_write)):
+    d = {"id": new_id("L"), **l.model_dump(mode="json"), "dispatcher": user.get("name", user["id"]), "stage": "Booked", "bol_status": "Pending", "pod_status": "Pending", "invoice_status": "Not Ready", "payment_status": "Pending", "created_at": now_iso(), "updated_at": now_iso()}
+    d["rpm"] = round(d["rate"] / d["miles"], 2) if d["miles"] > 0 and d["rate"] > 0 else 0
+    await safe_db(db.loads.insert_one(d), "load create"); clean_doc(d)
+    await log_activity_best_effort(d["id"], "Load Created", "", "Booked", user.get("name", user["id"]), "Load created")
     return d
 
 @api.put("/loads/{lid}")
-async def update_load(lid: str, data: dict, user=Depends(operational_write)):
-    data["updated_at"] = now_iso()
-    if data.get("miles") and data.get("rate"):
-        data["rpm"] = round(data["rate"] / data["miles"], 2)
-    await db.loads.update_one({"id": lid}, {"$set": data})
+async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write)):
+    load = await safe_db(db.loads.find_one({"id": lid}, {"_id": 0}), "load lookup")
+    if not load: raise HTTPException(404, "Not found")
+    updates = data.model_dump(mode="json", exclude_unset=True)
+    updates["updated_at"] = now_iso()
+    miles, rate = updates.get("miles", load.get("miles", 0)), updates.get("rate", load.get("rate", 0))
+    if "miles" in updates or "rate" in updates:
+        updates["rpm"] = round(rate / miles, 2) if miles > 0 and rate > 0 else 0
+    result = await safe_db(db.loads.update_one({"id": lid}, {"$set": updates}), "load update")
+    if not result.matched_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 @api.delete("/loads/{lid}")
 async def delete_load(lid: str, user=Depends(operational_write)):
-    await db.loads.delete_one({"id": lid}); return {"ok": True}
-
-class StageChange(BaseModel):
-    stage: str
-    updated_by: str = "system"
-    notes: str = ""
+    result = await safe_db(db.loads.delete_one({"id": lid}), "load delete")
+    if not result.deleted_count: raise HTTPException(404, "Not found")
+    return {"ok": True}
 
 @api.post("/loads/{lid}/stage")
-async def change_stage(lid: str, data: StageChange, user=Depends(operational_write)):
-    load = await db.loads.find_one({"id": lid}, {"_id": 0})
+async def change_stage(lid: str, data: SafeStageChange, user=Depends(operational_write)):
+    load = await safe_db(db.loads.find_one({"id": lid}, {"_id": 0}), "load stage lookup")
     if not load: raise HTTPException(404, "Not found")
-    old = load.get("stage", "")
-    updates = {"stage": data.stage, "updated_at": now_iso()}
+    try: old_stage = LoadStage(load.get("stage", ""))
+    except ValueError: raise HTTPException(409, "Current load stage is invalid")
+    if data.stage == old_stage:
+        return {"ok": True, "stage": data.stage.value}
+    origin_value = load.get("exception_origin_stage")
+    try: exception_origin = LoadStage(origin_value) if origin_value else None
+    except ValueError: exception_origin = None
+    if not transition_allowed(old_stage, data.stage, exception_origin):
+        raise HTTPException(409, f"Transition from {old_stage.value} to {data.stage.value} is not allowed")
+    old = old_stage.value
+    stage = data.stage.value
+    updates = {"stage": stage, "updated_at": now_iso()}
+    mongo_update = {"$set": updates}
+    if stage == "Exception": updates["exception_origin_stage"] = old
+    if old_stage == LoadStage.EXCEPTION:
+        mongo_update["$unset"] = {"exception_origin_stage": ""}
     # Auto-update related statuses
-    if data.stage == "Loaded": updates["bol_status"] = "Received"
-    if data.stage == "Delivered": updates["pod_status"] = "Pending"
-    if data.stage == "Docs Pending": updates["invoice_status"] = "Docs Pending"
-    if data.stage == "Invoice Pending": updates["invoice_status"] = "Ready to Invoice"
-    if data.stage == "Payment Pending": updates["invoice_status"] = "Payment Pending"
-    if data.stage == "Closed": updates["payment_status"] = "Paid"; updates["invoice_status"] = "Paid"
-    await db.loads.update_one({"id": lid}, {"$set": updates})
-    await log_activity(lid, "Stage Change", old, data.stage, user.get("name", user["id"]), data.notes)
-    return {"ok": True, "stage": data.stage}
+    if stage == "Loaded": updates["bol_status"] = "Received"
+    if stage == "Delivered": updates["pod_status"] = "Pending"
+    if stage == "Docs Pending": updates["invoice_status"] = "Docs Pending"
+    if stage == "Invoice Pending": updates["invoice_status"] = "Ready to Invoice"
+    if stage == "Payment Pending": updates["invoice_status"] = "Payment Pending"
+    if stage == "Closed": updates["payment_status"] = "Paid"; updates["invoice_status"] = "Paid"
+    transition_query = {"id": lid, "stage": old}
+    if old_stage == LoadStage.EXCEPTION:
+        transition_query["exception_origin_stage"] = origin_value
+    result = await safe_db(db.loads.update_one(transition_query, mongo_update), "load stage update")
+    if not result.matched_count:
+        raise HTTPException(409, "Load stage changed concurrently")
+    await log_activity_best_effort(lid, "Stage Change", old, stage, user.get("name", user["id"]), data.notes)
+    return {"ok": True, "stage": stage}
 
 # ============ ACTIVITY LOG ============
 async def log_activity(load_id, action, old, new, user, notes=""):
@@ -318,7 +367,14 @@ async def log_activity(load_id, action, old, new, user, notes=""):
         "old_status": old, "new_status": new,
         "updated_by": user, "timestamp": now_iso(), "notes": notes
     }
-    await db.activity.insert_one(entry)
+    await safe_db(db.activity.insert_one(entry), "activity create")
+
+async def log_activity_best_effort(load_id, action, old, new, user, notes=""):
+    """Temporary degraded-audit policy until a transactional outbox exists."""
+    try:
+        await log_activity(load_id, action, old, new, user, notes)
+    except Exception:
+        logging.warning("Activity logging failed after successful primary write")
 
 @api.get("/activity")
 async def list_activity(load_id: Optional[str] = None):
@@ -326,31 +382,20 @@ async def list_activity(load_id: Optional[str] = None):
     return await db.activity.find(q, {"_id": 0}).sort("timestamp", -1).to_list(500)
 
 # ============ DOCUMENTS ============
-class Document(BaseModel):
-    id: str = Field(default_factory=lambda: new_id("DOC"))
-    load_id: str
-    doc_type: str  # rate_con, bol, pod, lumper, scale, invoice, other
-    filename: str = ""
-    url: str = ""
-    uploaded_by: str = ""
-    uploaded_at: str = Field(default_factory=now_iso)
-    notes: str = ""
-
 @api.get("/documents")
 async def list_docs(load_id: Optional[str] = None):
     q = {"load_id": load_id} if load_id else {}
     return await db.documents.find(q, {"_id": 0}).to_list(1000)
 
 @api.post("/documents")
-async def create_doc(d: Document, user=Depends(operational_write)):
-    doc = d.model_dump()
-    doc["uploaded_by"] = user.get("name", user["id"])
-    await db.documents.insert_one(doc); clean_doc(doc)
-    await log_activity(d.load_id, f"Uploaded {d.doc_type}", "", "", doc["uploaded_by"], d.filename)
+async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
+    doc = {"id": new_id("DOC"), **d.model_dump(mode="json"), "uploaded_at": now_iso(), "uploaded_by": user.get("name", user["id"])}
+    await safe_db(db.documents.insert_one(doc), "document create"); clean_doc(doc)
+    await log_activity_best_effort(d.load_id, f"Uploaded {d.doc_type.value}", "", "", doc["uploaded_by"], d.filename)
     return doc
 
 # ============ INVOICES ============
-class Invoice(BaseModel):
+class InternalSeedInvoice(BaseModel):
     id: str = Field(default_factory=lambda: new_id("INV"))
     load_id: str
     customer: str = ""
@@ -367,19 +412,23 @@ async def list_invoices():
     return await db.invoices.find({}, {"_id": 0}).to_list(1000)
 
 @api.post("/invoices")
-async def create_invoice(inv: Invoice, user=Depends(finance_write)):
-    doc = inv.model_dump(); await db.invoices.insert_one(doc); clean_doc(doc)
+async def create_invoice(inv: InvoiceCreate, user=Depends(finance_write)):
+    doc = {"id": new_id("INV"), **inv.model_dump(mode="json"), "created_at": now_iso()}; await safe_db(db.invoices.insert_one(doc), "invoice create"); clean_doc(doc)
     return doc
 
 @api.put("/invoices/{iid}")
-async def update_invoice(iid: str, data: dict, user=Depends(finance_write)):
-    await db.invoices.update_one({"id": iid}, {"$set": data}); return {"ok": True}
+async def update_invoice(iid: str, data: InvoiceUpdate, user=Depends(finance_write)):
+    if not await safe_db(db.invoices.find_one({"id": iid}, {"_id": 0}), "invoice lookup"): raise HTTPException(404, "Not found")
+    updates = data.model_dump(mode="json", exclude_unset=True); updates["updated_at"] = now_iso()
+    result = await safe_db(db.invoices.update_one({"id": iid}, {"$set": updates}), "invoice update")
+    if not result.matched_count: raise HTTPException(404, "Not found")
+    return {"ok": True}
 
 # ============ PLACEHOLDER INTEGRATION FUNCTIONS ============
 @api.post("/routing/calc")
-async def calc_route(data: dict, user=Depends(operational_write)):
+async def calc_route(data: RouteCalculationRequest, user=Depends(operational_write)):
     """Mock Google Maps route mileage."""
-    pickup = data.get("pickup", ""); delivery = data.get("delivery", "")
+    pickup = data.pickup; delivery = data.delivery
     seed = (hash(pickup + delivery) & 0x7fffffff) or 1
     random.seed(seed)
     miles = round(random.uniform(180, 1400), 0)
@@ -393,8 +442,8 @@ async def calc_route(data: dict, user=Depends(operational_write)):
     }
 
 @api.post("/weather/check")
-async def weather_check(data: dict, user=Depends(operational_write)):
-    random.seed(hash(str(data)) & 0x7fffffff)
+async def weather_check(data: WeatherCheckRequest, user=Depends(operational_write)):
+    random.seed(hash(str(data.model_dump())) & 0x7fffffff)
     levels = ["Low","Medium","High","Critical"]
     return {
         "pickup": {"temp_f": random.randint(20,90), "rain": random.choice(levels), "wind": random.choice(levels), "visibility": random.choice(levels)},
@@ -403,8 +452,8 @@ async def weather_check(data: dict, user=Depends(operational_write)):
     }
 
 @api.post("/roads/check")
-async def roads_check(data: dict, user=Depends(operational_write)):
-    random.seed(hash(str(data)+"r") & 0x7fffffff)
+async def roads_check(data: LoadIdRequest, user=Depends(operational_write)):
+    random.seed(hash(str(data.model_dump())+"r") & 0x7fffffff)
     return {
         "traffic_delay_min": random.randint(0, 45),
         "accident_risk": random.choice(["Low","Medium","High"]),
@@ -415,8 +464,8 @@ async def roads_check(data: dict, user=Depends(operational_write)):
     }
 
 @api.post("/samsara/vehicle")
-async def samsara_vehicle(data: dict, user=Depends(operational_write)):
-    vid = data.get("vehicle_id","VEH000")
+async def samsara_vehicle(data: SamsaraVehicleRequest, user=Depends(operational_write)):
+    vid = data.vehicle_id
     random.seed(hash(vid) & 0x7fffffff)
     return {
         "vehicle_id": vid,
@@ -433,8 +482,8 @@ async def samsara_vehicle(data: dict, user=Depends(operational_write)):
     }
 
 @api.post("/fuel/plan")
-async def fuel_plan(data: dict, user=Depends(operational_write)):
-    random.seed(hash(str(data)+"f") & 0x7fffffff)
+async def fuel_plan(data: LoadIdRequest, user=Depends(operational_write)):
+    random.seed(hash(str(data.model_dump())+"f") & 0x7fffffff)
     stops = ["Loves","Pilot","TA","Flying J","Sapp Bros","Petro"]
     return {
         "fuel_level_pct": random.randint(20, 60),
@@ -450,8 +499,8 @@ async def fuel_plan(data: dict, user=Depends(operational_write)):
     }
 
 @api.post("/truckstops/plan")
-async def truckstop_plan(data: dict, user=Depends(operational_write)):
-    random.seed(hash(str(data)+"ts") & 0x7fffffff)
+async def truckstop_plan(data: LoadIdRequest, user=Depends(operational_write)):
+    random.seed(hash(str(data.model_dump())+"ts") & 0x7fffffff)
     return {
         "name": random.choice(["Loves 344","Pilot 208","TA Ontario","Sapp Bros"]),
         "distance_miles": random.randint(40, 200),
@@ -460,21 +509,15 @@ async def truckstop_plan(data: dict, user=Depends(operational_write)):
         "eta_arrival": (datetime.now(timezone.utc)+timedelta(hours=random.uniform(1,6))).isoformat(),
     }
 
-class DriverAlertIn(BaseModel):
-    load_id: str
-    alert_type: str  # weather, road, fuel, eta, safety
-    message: str = ""
-    dispatcher: str = "Dispatcher"
-
 @api.post("/alerts/generate")
-async def generate_alert(a: DriverAlertIn, user=Depends(operational_write)):
-    load = await db.loads.find_one({"id": a.load_id}, {"_id": 0})
+async def generate_alert(a: DriverAlertRequest, user=Depends(operational_write)):
+    load = await safe_db(db.loads.find_one({"id": a.load_id}, {"_id": 0}), "alert load lookup")
     driver = None; truck = None
     if load:
         if load.get("driver_id"):
-            driver = await db.drivers.find_one({"id": load["driver_id"]}, {"_id": 0})
+            driver = await safe_db(db.drivers.find_one({"id": load["driver_id"]}, {"_id": 0}), "alert driver lookup")
         if load.get("truck_id"):
-            truck = await db.trucks.find_one({"id": load["truck_id"]}, {"_id": 0})
+            truck = await safe_db(db.trucks.find_one({"id": load["truck_id"]}, {"_id": 0}), "alert truck lookup")
     msg = f"""DRIVER ALERT
 Load ID: {a.load_id}
 Driver: {driver['name'] if driver else 'Unassigned'}
@@ -486,21 +529,17 @@ Issue: {a.message}
 ETA: {load.get('eta','TBD') if load else 'TBD'}
 Next update required by: {(datetime.now(timezone.utc)+timedelta(hours=2)).strftime('%H:%M UTC')}
 Dispatcher: {user.get('name', user['id'])}"""
-    await log_activity(a.load_id, "Driver Alert Generated", "", a.alert_type, user.get("name", user["id"]), a.message)
+    await log_activity(a.load_id, "Driver Alert Generated", "", a.alert_type.value, user.get("name", user["id"]), a.message)
     return {"message": msg}
 
 # ============ AI ASSISTANT (Claude Sonnet) ============
-class AiChatIn(BaseModel):
-    session_id: str = "default"
-    message: str
-
 @api.post("/ai/chat")
-async def ai_chat(data: AiChatIn, user=Depends(ai_access)):
+async def ai_chat(data: AiChatRequest, user=Depends(ai_access)):
     # Gather live data context
-    loads = await db.loads.find({}, {"_id": 0}).to_list(200)
-    trucks = await db.trucks.find({}, {"_id": 0}).to_list(200)
-    drivers = await db.drivers.find({}, {"_id": 0}).to_list(200)
-    invoices = await db.invoices.find({}, {"_id": 0}).to_list(200)
+    loads = await safe_db(db.loads.find({}, {"_id": 0}).to_list(200), "AI load context")
+    trucks = await safe_db(db.trucks.find({}, {"_id": 0}).to_list(200), "AI truck context")
+    drivers = await safe_db(db.drivers.find({}, {"_id": 0}).to_list(200), "AI driver context")
+    invoices = await safe_db(db.invoices.find({}, {"_id": 0}).to_list(200), "AI invoice context")
     context = f"""Live business data snapshot (JSON):
 LOADS ({len(loads)}): {loads[:20]}
 TRUCKS ({len(trucks)}): {trucks[:15]}
@@ -653,7 +692,7 @@ async def seed(force: bool = False, user=Depends(owner_only)):
         ins_days = random.choice([-5, 15, 45, 120, 200, 300])
         reg_days = random.choice([10, 25, 60, 150, 250])
         insp_days = random.choice([-2, 20, 40, 90, 180])
-        t = Truck(
+        t = InternalSeedTruck(
             truck_number=f"TRK-{100+i}",
             vin=f"1HGBH41JXMN{100000+i}",
             plate=f"USA-{2000+i}",
@@ -684,7 +723,7 @@ async def seed(force: bool = False, user=Depends(owner_only)):
     for i in range(10):
         cdl_days = random.choice([-3, 20, 45, 120, 220, 400])
         med_days = random.choice([-1, 15, 35, 90, 180])
-        d = Driver(
+        d = InternalSeedDriver(
             name=f"{first[i]} {last[i]}",
             phone=f"+1-{random.randint(200,999)}-{random.randint(200,999)}-{random.randint(1000,9999)}",
             email=f"{first[i].lower()}.{last[i].lower()}@dispatch.com",
@@ -735,7 +774,7 @@ async def seed(force: bool = False, user=Depends(owner_only)):
         delivery_dt = pickup_dt + timedelta(days=random.randint(1,4))
         assigned = stg not in ("Booked",)
         t_idx = i % 8; d_idx = i % 10
-        l = Load(
+        l = InternalSeedLoad(
             customer=random.choice(customers), broker=random.choice(brokers),
             rate_con_number=f"RC{random.randint(100000,999999)}",
             pickup_address=f"{random.randint(100,9999)} Warehouse Dr, {p[0]}, {p[1]} {p[2]}",
@@ -765,7 +804,7 @@ async def seed(force: bool = False, user=Depends(owner_only)):
     inv_docs = []
     for l in load_docs:
         if l["stage"] in ("Invoice Pending","Payment Pending","Docs Pending"):
-            inv_docs.append(Invoice(
+            inv_docs.append(InternalSeedInvoice(
                 load_id=l["id"], customer=l["customer"], amount=l["rate"],
                 status=l["invoice_status"], due_date=(datetime.now(timezone.utc)+timedelta(days=30)).isoformat()
             ).model_dump())
@@ -799,35 +838,18 @@ async def get_assumptions():
     return doc
 
 @api.put("/assumptions")
-async def update_assumptions(data: dict, user=Depends(finance_write)):
-    data["id"] = "default"
-    await db.assumptions.update_one({"id": "default"}, {"$set": data}, upsert=True)
+async def update_assumptions(data: AssumptionUpdate, user=Depends(finance_write)):
+    updates = data.model_dump(mode="json", exclude_unset=True)
+    await safe_db(db.assumptions.update_one({"id": "default"}, {"$set": updates}, upsert=True), "assumption update")
     return {"ok": True}
 
 # ============ LOAD DECISION ENGINE ============
-class LoadAnalysisIn(BaseModel):
-    offered_rate: float
-    loaded_miles: float
-    deadhead_miles: float = 0
-    fuel_price: Optional[float] = None
-    mpg: Optional[float] = None
-    driver_type: str = "Solo"   # Solo | Team
-    driver_pay_cpm: Optional[float] = None
-    tolls: Optional[float] = None
-    pickup_city: str = ""
-    delivery_city: str = ""
-    pickup_datetime: str = ""
-    delivery_datetime: str = ""
-    broker: str = ""
-    commodity: str = ""
-    weight: float = 0
-
 @api.post("/loads/analyze")
-async def analyze_load(data: LoadAnalysisIn, user=Depends(operational_write)):
-    a = await db.assumptions.find_one({"id": "default"}, {"_id": 0}) or DEFAULT_ASSUMPTIONS
+async def analyze_load(data: LoadAnalysisRequest, user=Depends(operational_write)):
+    a = await safe_db(db.assumptions.find_one({"id": "default"}, {"_id": 0}), "analysis assumption lookup") or DEFAULT_ASSUMPTIONS
     fuel_price = data.fuel_price if data.fuel_price is not None else a["fuel_price"]
     mpg = data.mpg if data.mpg is not None else a["mpg"]
-    driver_cpm = data.driver_pay_cpm if data.driver_pay_cpm is not None else (a["driver_pay_team_cpm"] if data.driver_type == "Team" else a["driver_pay_solo_cpm"])
+    driver_cpm = data.driver_pay_cpm if data.driver_pay_cpm is not None else (a["driver_pay_team_cpm"] if data.driver_type.value == "Team" else a["driver_pay_solo_cpm"])
     tolls = data.tolls if data.tolls is not None else a["default_toll"]
 
     total_miles = data.loaded_miles + data.deadhead_miles

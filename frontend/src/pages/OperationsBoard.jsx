@@ -4,12 +4,14 @@ import { StageBadge, RiskBadge, Money, Num } from "../components/Badges";
 import api from "../lib/api";
 import { useNavigate } from "react-router-dom";
 import { Filter } from "lucide-react";
+import { toast, Toaster } from "sonner";
 
 const COLUMNS = [
   "Booked","Assigned","Dispatched","Pickup Started","Arrived Pickup","Loaded",
   "In Transit","Arrived Delivery","Delivered","Docs Pending","Invoice Pending",
   "Payment Pending","Closed","Exception"
 ];
+const NEXT_STAGE = Object.fromEntries(COLUMNS.slice(0, 12).map((stage, index) => [stage, COLUMNS[index + 1]]));
 
 export default function OperationsBoard() {
   const [loads, setLoads] = useState([]);
@@ -33,12 +35,20 @@ export default function OperationsBoard() {
     if (!loadId) return;
     const load = loads.find(l => l.id === loadId);
     if (!load || load.stage === targetStage) return;
+    const allowed = load.stage === "Exception"
+      ? targetStage === load.exception_origin_stage
+      : targetStage === NEXT_STAGE[load.stage] || (load.stage !== "Closed" && targetStage === "Exception");
+    if (!allowed) {
+      toast.error("That workflow transition is not allowed");
+      return;
+    }
     // Optimistic update
     setLoads(prev => prev.map(l => l.id === loadId ? {...l, stage: targetStage} : l));
     try {
-      await api.post(`/loads/${loadId}/stage`, { stage: targetStage, updated_by: "Board DnD", notes: "Kanban drag" });
-    } catch {
+      await api.post(`/loads/${loadId}/stage`, { stage: targetStage, notes: "Kanban drag" });
+    } catch (error) {
       setLoads(prev => prev.map(l => l.id === loadId ? {...l, stage: load.stage} : l));
+      toast.error(error?.response?.status === 409 ? error.response.data.detail : "Stage update failed");
     }
   };
 
@@ -54,6 +64,7 @@ export default function OperationsBoard() {
 
   return (
     <div>
+      <Toaster position="top-right" theme="dark" />
       <Topbar title="Operations Board" subtitle={`${filtered.length} loads · drag cards to change stage`} />
       <div className="px-6 py-3 border-b border-zinc-800 flex items-center gap-3 flex-wrap bg-[#0A0A0C]">
         <div className="flex items-center gap-2 text-xs text-zinc-500"><Filter className="w-3.5 h-3.5" /> Filters</div>
@@ -69,7 +80,7 @@ export default function OperationsBoard() {
       <div className="overflow-x-auto p-4">
         <div className="flex gap-3 min-w-max pb-4">
           {COLUMNS.map(col => {
-            const cards = filtered.filter(l => (col==="Exception" ? l.risk==="Critical" : l.stage===col));
+            const cards = filtered.filter(l => l.stage===col);
             return (
               <div key={col} className="w-[280px] shrink-0" data-testid={`kanban-col-${col}`}
                 onDragOver={(e)=>{e.preventDefault(); setDragOver(col);}}
