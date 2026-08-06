@@ -1,14 +1,17 @@
 """Metaphora Control Tower - Freight Operations Backend"""
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, logging, uuid, jwt, bcrypt, random, math, asyncio
+import os, logging, uuid, bcrypt, random, math, asyncio, re
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+from app.config import Settings, force_seed_allowed
+from app.permissions import require_capability, require_owner
+from app.security import authenticated_user_dependency, create_token, public_user
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -17,11 +20,11 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-JWT_SECRET = os.environ.get('JWT_SECRET', 'dev_secret')
+settings = Settings.from_env()
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
-app = FastAPI(title="Metaphora Control Tower")
-api = APIRouter(prefix="/api")
+app = FastAPI(title="Metaphora Control Tower", docs_url=None, redoc_url=None, openapi_url=None)
+public_api = APIRouter(prefix="/api")
 
 # ============ UTILITIES ============
 def now_iso():
@@ -37,55 +40,88 @@ def clean_doc(d):
 
 # ============ AUTH ============
 class LoginIn(BaseModel):
-    email: str
+    email: EmailStr
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value):
+        return str(value).strip().lower()
 
 class SignupIn(BaseModel):
-    email: str
+    email: EmailStr
     password: str
     name: str
-    role: str = "dispatcher"
+    role: str = "viewer"
 
-def create_token(user):
-    payload = {
-        "id": user["id"], "email": user["email"], "role": user["role"], "name": user["name"],
-        "exp": datetime.now(timezone.utc) + timedelta(days=30)
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value):
+        return str(value).strip().lower()
 
-async def get_user(authorization: Optional[str] = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing token")
-    try:
-        payload = jwt.decode(authorization[7:], JWT_SECRET, algorithms=["HS256"])
-        return payload
-    except Exception:
-        raise HTTPException(401, "Invalid token")
+    @field_validator("password")
+    @classmethod
+    def strong_password(cls, value):
+        if len(value) < 12:
+            raise ValueError("Password must be at least 12 characters")
+        return value
 
-@api.post("/auth/signup")
+get_current_user = authenticated_user_dependency(db, settings.jwt_secret)
+api = APIRouter(prefix="/api", dependencies=[Depends(get_current_user)])
+operational_write = require_capability(get_current_user, "operational")
+safety_write = require_capability(get_current_user, "safety")
+finance_write = require_capability(get_current_user, "finance")
+ai_access = require_capability(get_current_user, "ai")
+owner_only = require_owner(get_current_user)
+
+
+async def find_user_by_email(email: str):
+    """Find normalized users first, then safely support legacy mixed-case records.
+
+    A later migration should add email_normalized, backfill historical users,
+    and create a unique index on that normalized field.
+    """
+    normalized = email.strip().lower()
+    user = await db.users.find_one({"email": normalized})
+    if user:
+        return user
+    legacy_pattern = re.compile(rf"^{re.escape(normalized)}$", re.IGNORECASE)
+    return await db.users.find_one({"email": legacy_pattern})
+
+
+@public_api.post("/auth/signup")
 async def signup(data: SignupIn):
-    existing = await db.users.find_one({"email": data.email})
+    if data.role.strip().lower() != "viewer":
+        raise HTTPException(403, "Public signup can only create viewer users")
+    existing = await find_user_by_email(str(data.email))
     if existing:
         raise HTTPException(400, "Email exists")
     user = {
-        "id": new_id("U"), "email": data.email, "name": data.name, "role": data.role,
+        "id": new_id("U"), "email": str(data.email), "name": data.name, "role": "viewer",
         "password": bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode(),
         "created_at": now_iso()
     }
     await db.users.insert_one(user)
-    user.pop("password"); clean_doc(user)
-    return {"token": create_token(user), "user": user}
+    safe_user = public_user(user)
+    return {"token": create_token(safe_user, settings.jwt_secret), "user": safe_user}
 
-@api.post("/auth/login")
+@public_api.post("/auth/login")
 async def login(data: LoginIn):
-    user = await db.users.find_one({"email": data.email})
-    if not user or not bcrypt.checkpw(data.password.encode(), user["password"].encode()):
+    user = await find_user_by_email(str(data.email))
+    stored_password = user.get("password") if user else None
+    password_valid = False
+    if isinstance(stored_password, str):
+        try:
+            password_valid = bcrypt.checkpw(data.password.encode(), stored_password.encode())
+        except (TypeError, ValueError):
+            password_valid = False
+    if not user or not password_valid:
         raise HTTPException(401, "Invalid credentials")
-    clean_doc(user); user.pop("password", None)
-    return {"token": create_token(user), "user": user}
+    safe_user = public_user(user)
+    return {"token": create_token(safe_user, settings.jwt_secret), "user": safe_user}
 
 @api.get("/auth/me")
-async def me(user=Depends(get_user)):
+async def me(user=Depends(get_current_user)):
     return user
 
 # ============ MODELS ============
@@ -189,18 +225,18 @@ async def list_trucks():
     return docs
 
 @api.post("/trucks")
-async def create_truck(t: Truck):
+async def create_truck(t: Truck, user=Depends(safety_write)):
     d = t.model_dump()
     await db.trucks.insert_one(d); clean_doc(d)
     return d
 
 @api.put("/trucks/{tid}")
-async def update_truck(tid: str, data: dict):
+async def update_truck(tid: str, data: dict, user=Depends(safety_write)):
     await db.trucks.update_one({"id": tid}, {"$set": data})
     return {"ok": True}
 
 @api.delete("/trucks/{tid}")
-async def delete_truck(tid: str):
+async def delete_truck(tid: str, user=Depends(safety_write)):
     await db.trucks.delete_one({"id": tid}); return {"ok": True}
 
 # ============ DRIVERS ============
@@ -209,16 +245,16 @@ async def list_drivers():
     return await db.drivers.find({}, {"_id": 0}).to_list(1000)
 
 @api.post("/drivers")
-async def create_driver(d: Driver):
+async def create_driver(d: Driver, user=Depends(safety_write)):
     doc = d.model_dump(); await db.drivers.insert_one(doc); clean_doc(doc)
     return doc
 
 @api.put("/drivers/{did}")
-async def update_driver(did: str, data: dict):
+async def update_driver(did: str, data: dict, user=Depends(safety_write)):
     await db.drivers.update_one({"id": did}, {"$set": data}); return {"ok": True}
 
 @api.delete("/drivers/{did}")
-async def delete_driver(did: str):
+async def delete_driver(did: str, user=Depends(safety_write)):
     await db.drivers.delete_one({"id": did}); return {"ok": True}
 
 # ============ LOADS ============
@@ -233,16 +269,16 @@ async def get_load(lid: str):
     return l
 
 @api.post("/loads")
-async def create_load(l: Load):
+async def create_load(l: Load, user=Depends(operational_write)):
     d = l.model_dump()
     if d["miles"] and d["rate"]:
         d["rpm"] = round(d["rate"] / d["miles"], 2)
     await db.loads.insert_one(d); clean_doc(d)
-    await log_activity(d["id"], "Load Created", "", "Booked", d.get("dispatcher","system"), "Load created")
+    await log_activity(d["id"], "Load Created", "", "Booked", user.get("name", user["id"]), "Load created")
     return d
 
 @api.put("/loads/{lid}")
-async def update_load(lid: str, data: dict):
+async def update_load(lid: str, data: dict, user=Depends(operational_write)):
     data["updated_at"] = now_iso()
     if data.get("miles") and data.get("rate"):
         data["rpm"] = round(data["rate"] / data["miles"], 2)
@@ -250,7 +286,7 @@ async def update_load(lid: str, data: dict):
     return {"ok": True}
 
 @api.delete("/loads/{lid}")
-async def delete_load(lid: str):
+async def delete_load(lid: str, user=Depends(operational_write)):
     await db.loads.delete_one({"id": lid}); return {"ok": True}
 
 class StageChange(BaseModel):
@@ -259,7 +295,7 @@ class StageChange(BaseModel):
     notes: str = ""
 
 @api.post("/loads/{lid}/stage")
-async def change_stage(lid: str, data: StageChange):
+async def change_stage(lid: str, data: StageChange, user=Depends(operational_write)):
     load = await db.loads.find_one({"id": lid}, {"_id": 0})
     if not load: raise HTTPException(404, "Not found")
     old = load.get("stage", "")
@@ -272,7 +308,7 @@ async def change_stage(lid: str, data: StageChange):
     if data.stage == "Payment Pending": updates["invoice_status"] = "Payment Pending"
     if data.stage == "Closed": updates["payment_status"] = "Paid"; updates["invoice_status"] = "Paid"
     await db.loads.update_one({"id": lid}, {"$set": updates})
-    await log_activity(lid, "Stage Change", old, data.stage, data.updated_by, data.notes)
+    await log_activity(lid, "Stage Change", old, data.stage, user.get("name", user["id"]), data.notes)
     return {"ok": True, "stage": data.stage}
 
 # ============ ACTIVITY LOG ============
@@ -306,9 +342,11 @@ async def list_docs(load_id: Optional[str] = None):
     return await db.documents.find(q, {"_id": 0}).to_list(1000)
 
 @api.post("/documents")
-async def create_doc(d: Document):
-    doc = d.model_dump(); await db.documents.insert_one(doc); clean_doc(doc)
-    await log_activity(d.load_id, f"Uploaded {d.doc_type}", "", "", d.uploaded_by, d.filename)
+async def create_doc(d: Document, user=Depends(operational_write)):
+    doc = d.model_dump()
+    doc["uploaded_by"] = user.get("name", user["id"])
+    await db.documents.insert_one(doc); clean_doc(doc)
+    await log_activity(d.load_id, f"Uploaded {d.doc_type}", "", "", doc["uploaded_by"], d.filename)
     return doc
 
 # ============ INVOICES ============
@@ -329,17 +367,17 @@ async def list_invoices():
     return await db.invoices.find({}, {"_id": 0}).to_list(1000)
 
 @api.post("/invoices")
-async def create_invoice(inv: Invoice):
+async def create_invoice(inv: Invoice, user=Depends(finance_write)):
     doc = inv.model_dump(); await db.invoices.insert_one(doc); clean_doc(doc)
     return doc
 
 @api.put("/invoices/{iid}")
-async def update_invoice(iid: str, data: dict):
+async def update_invoice(iid: str, data: dict, user=Depends(finance_write)):
     await db.invoices.update_one({"id": iid}, {"$set": data}); return {"ok": True}
 
 # ============ PLACEHOLDER INTEGRATION FUNCTIONS ============
 @api.post("/routing/calc")
-async def calc_route(data: dict):
+async def calc_route(data: dict, user=Depends(operational_write)):
     """Mock Google Maps route mileage."""
     pickup = data.get("pickup", ""); delivery = data.get("delivery", "")
     seed = (hash(pickup + delivery) & 0x7fffffff) or 1
@@ -355,7 +393,7 @@ async def calc_route(data: dict):
     }
 
 @api.post("/weather/check")
-async def weather_check(data: dict):
+async def weather_check(data: dict, user=Depends(operational_write)):
     random.seed(hash(str(data)) & 0x7fffffff)
     levels = ["Low","Medium","High","Critical"]
     return {
@@ -365,7 +403,7 @@ async def weather_check(data: dict):
     }
 
 @api.post("/roads/check")
-async def roads_check(data: dict):
+async def roads_check(data: dict, user=Depends(operational_write)):
     random.seed(hash(str(data)+"r") & 0x7fffffff)
     return {
         "traffic_delay_min": random.randint(0, 45),
@@ -377,7 +415,7 @@ async def roads_check(data: dict):
     }
 
 @api.post("/samsara/vehicle")
-async def samsara_vehicle(data: dict):
+async def samsara_vehicle(data: dict, user=Depends(operational_write)):
     vid = data.get("vehicle_id","VEH000")
     random.seed(hash(vid) & 0x7fffffff)
     return {
@@ -395,7 +433,7 @@ async def samsara_vehicle(data: dict):
     }
 
 @api.post("/fuel/plan")
-async def fuel_plan(data: dict):
+async def fuel_plan(data: dict, user=Depends(operational_write)):
     random.seed(hash(str(data)+"f") & 0x7fffffff)
     stops = ["Loves","Pilot","TA","Flying J","Sapp Bros","Petro"]
     return {
@@ -412,7 +450,7 @@ async def fuel_plan(data: dict):
     }
 
 @api.post("/truckstops/plan")
-async def truckstop_plan(data: dict):
+async def truckstop_plan(data: dict, user=Depends(operational_write)):
     random.seed(hash(str(data)+"ts") & 0x7fffffff)
     return {
         "name": random.choice(["Loves 344","Pilot 208","TA Ontario","Sapp Bros"]),
@@ -429,7 +467,7 @@ class DriverAlertIn(BaseModel):
     dispatcher: str = "Dispatcher"
 
 @api.post("/alerts/generate")
-async def generate_alert(a: DriverAlertIn):
+async def generate_alert(a: DriverAlertIn, user=Depends(operational_write)):
     load = await db.loads.find_one({"id": a.load_id}, {"_id": 0})
     driver = None; truck = None
     if load:
@@ -447,8 +485,8 @@ Route: {load.get('pickup_city','') if load else ''} → {load.get('delivery_city
 Issue: {a.message}
 ETA: {load.get('eta','TBD') if load else 'TBD'}
 Next update required by: {(datetime.now(timezone.utc)+timedelta(hours=2)).strftime('%H:%M UTC')}
-Dispatcher: {a.dispatcher}"""
-    await log_activity(a.load_id, "Driver Alert Generated", "", a.alert_type, a.dispatcher, a.message)
+Dispatcher: {user.get('name', user['id'])}"""
+    await log_activity(a.load_id, "Driver Alert Generated", "", a.alert_type, user.get("name", user["id"]), a.message)
     return {"message": msg}
 
 # ============ AI ASSISTANT (Claude Sonnet) ============
@@ -457,7 +495,7 @@ class AiChatIn(BaseModel):
     message: str
 
 @api.post("/ai/chat")
-async def ai_chat(data: AiChatIn):
+async def ai_chat(data: AiChatIn, user=Depends(ai_access)):
     # Gather live data context
     loads = await db.loads.find({}, {"_id": 0}).to_list(200)
     trucks = await db.trucks.find({}, {"_id": 0}).to_list(200)
@@ -483,8 +521,9 @@ Answer as the Metaphora Control Tower operations assistant for a USA trucking ca
                     yield ev.content
                 elif isinstance(ev, StreamDone):
                     break
-        except Exception as e:
-            yield f"[AI Error] {str(e)}\n\nFalling back to rule-based analysis:\n"
+        except Exception:
+            logger.error("AI provider request failed")
+            yield "[AI unavailable]\n\nFalling back to rule-based analysis:\n"
             yield rule_based_answer(data.message, loads, trucks, drivers, invoices)
 
     return StreamingResponse(stream(), media_type="text/plain",
@@ -585,8 +624,17 @@ async def dashboard_charts():
     }
 
 # ============ SEED ============
+def enforce_seed_config(force: bool) -> None:
+    """Validate all configuration gates before seed reads or writes begin."""
+    if not settings.allow_seed_endpoint:
+        raise HTTPException(403, "Seed endpoint is disabled")
+    if force and not force_seed_allowed(settings.app_env):
+        raise HTTPException(403, "Forced seed is disabled in this environment")
+
+
 @api.post("/seed")
-async def seed(force: bool = False):
+async def seed(force: bool = False, user=Depends(owner_only)):
+    enforce_seed_config(force)
     if not force:
         c = await db.loads.count_documents({})
         if c > 0:
@@ -725,9 +773,10 @@ async def seed(force: bool = False):
 
     # Activity
     for l in load_docs:
-        await log_activity(l["id"], "Load Created", "", "Booked", l["dispatcher"], "Seeded")
+        actor = user.get("name", user["id"])
+        await log_activity(l["id"], "Load Created", "", "Booked", actor, "Seeded")
         if l["stage"] != "Booked":
-            await log_activity(l["id"], "Stage Change", "Booked", l["stage"], l["dispatcher"], "")
+            await log_activity(l["id"], "Stage Change", "Booked", l["stage"], actor, "")
 
     return {"ok": True, "loads": len(load_docs), "trucks": len(truck_docs), "drivers": len(driver_docs), "invoices": len(inv_docs)}
 
@@ -750,7 +799,7 @@ async def get_assumptions():
     return doc
 
 @api.put("/assumptions")
-async def update_assumptions(data: dict):
+async def update_assumptions(data: dict, user=Depends(finance_write)):
     data["id"] = "default"
     await db.assumptions.update_one({"id": "default"}, {"$set": data}, upsert=True)
     return {"ok": True}
@@ -774,7 +823,7 @@ class LoadAnalysisIn(BaseModel):
     weight: float = 0
 
 @api.post("/loads/analyze")
-async def analyze_load(data: LoadAnalysisIn):
+async def analyze_load(data: LoadAnalysisIn, user=Depends(operational_write)):
     a = await db.assumptions.find_one({"id": "default"}, {"_id": 0}) or DEFAULT_ASSUMPTIONS
     fuel_price = data.fuel_price if data.fuel_price is not None else a["fuel_price"]
     mpg = data.mpg if data.mpg is not None else a["mpg"]
@@ -941,13 +990,14 @@ async def compliance_overview():
     return {"summary": summary, "items": items}
 
 # ============ HEALTH ============
-@api.get("/")
+@public_api.get("/")
 async def root():
     return {"app": "Metaphora Control Tower", "status": "operational", "time": now_iso()}
 
+app.include_router(public_api)
 app.include_router(api)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS','*').split(','),
+    allow_origins=settings.cors_origins,
     allow_methods=["*"], allow_headers=["*"])
 
 logging.basicConfig(level=logging.INFO)
