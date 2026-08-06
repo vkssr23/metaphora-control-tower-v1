@@ -21,7 +21,8 @@ export default function Settings() {
   };
 
   const saveAssumptions = async () => {
-    await api.put("/assumptions", a);
+    const editable = Object.fromEntries(numFields.map(([key]) => [key, a[key]]));
+    await api.put("/assumptions", editable);
     toast.success("Cost assumptions saved");
   };
 
