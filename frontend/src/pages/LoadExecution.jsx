@@ -5,6 +5,7 @@ import api from "../lib/api";
 import { StageBadge, RiskBadge, Money, Num } from "../components/Badges";
 import LoadPassport from "../components/LoadPassport";
 import RateConfirmationIntelligence from "../components/RateConfirmationIntelligence";
+import PartyVerification from "../components/PartyVerification";
 import { toast, Toaster } from "sonner";
 import {
   ChevronLeft, MapPin, Truck as TruckIcon, User, DollarSign, Calendar, AlertTriangle,
@@ -213,6 +214,7 @@ export default function LoadExecution() {
 
         <LoadPassport loadId={id} />
         <RateConfirmationIntelligence loadId={id} documents={documents} />
+        <PartyVerification loadId={id} />
 
         {/* TIMELINE */}
         <div className="terminal-card p-4">

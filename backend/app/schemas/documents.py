@@ -6,7 +6,7 @@ from pydantic import Field, field_validator, model_validator
 from .common import StrictMutationModel, StringEnum
 
 class DocumentType(StringEnum):
-    RATE_CON="rate_con"; BOL="bol"; POD="pod"; LUMPER="lumper"; SCALE="scale"; INVOICE="invoice"; OTHER="other"
+    RATE_CON="rate_con"; BOL="bol"; POD="pod"; LUMPER="lumper"; SCALE="scale"; INVOICE="invoice"; OTHER="other"; INSURANCE="insurance"
 
 class DocumentCreate(StrictMutationModel):
     load_id: str = Field(min_length=1, max_length=100)
@@ -14,6 +14,9 @@ class DocumentCreate(StrictMutationModel):
     filename: str = Field(min_length=1, max_length=255)
     url: str = Field(min_length=1, max_length=2048)
     notes: str = Field(default="", max_length=5000)
+    stated_effective_date: str = Field(default="", max_length=64)
+    stated_expiration_date: str = Field(default="", max_length=64)
+    named_insured: str = Field(default="", max_length=200)
 
     @field_validator("filename")
     @classmethod

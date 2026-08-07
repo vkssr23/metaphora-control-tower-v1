@@ -20,6 +20,8 @@ from app.domain.load_transitions import transition_allowed
 from app.domain.load_passports import MATERIAL_LOAD_FIELDS, bounded_load_snapshot, build_preinvalidation, material_categories, utc_now
 from app.passport_routes import register_passport_routes
 from app.rate_confirmation_routes import register_rate_confirmation_routes
+from app.party_verification_routes import register_party_verification_routes
+from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation, is_insurance_document
 from app.schemas import (
     AiChatRequest, AssumptionUpdate, DocumentCreate, DriverAlertRequest, DriverCreate,
     DriverUpdate, InvoiceCreate, InvoiceUpdate, LoadAnalysisRequest, LoadCreate,
@@ -382,6 +384,7 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
         updates["rpm"] = round(rate / miles, 2) if miles > 0 and rate > 0 else 0
     material_fields = sorted(set(updates) & MATERIAL_LOAD_FIELDS)
     passport = None; invalidation_audit = None; invalidation_plan = None
+    verification_case = None; verification_audit = None; verification_update = None
     passport_collection = getattr(db, "load_passports", None)
     if material_fields and passport_collection is not None:
         passport = await safe_db(passport_collection.find_one(tenant_filter(user, {"load_id": lid}), {"_id": 0}), "passport lookup")
@@ -389,7 +392,25 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
             invalidation_plan = build_preinvalidation(passport, material_categories(material_fields), user["id"], utc_now())
             if invalidation_plan["required"]:
                 invalidation_audit = await begin_audit(db.audit_events, user, "load_passport.material_change_invalidated", AuditEntityType.LOAD_PASSPORT, passport["id"], changed_fields=material_fields + ["status", "version"], previous=passport)
+    case_collection = getattr(db, "party_verification_cases", None)
+    party_fields = {"broker","customer","pickup_address","pickup_city","pickup_state","pickup_zip","pickup_appt","rate_con_number","equipment_type","commodity","weight","driver_id","truck_id"}
+    if set(material_fields) & party_fields and case_collection is not None:
+        verification_case = await safe_db(case_collection.find_one(tenant_filter(user, {"load_id": lid, "status": "cleared"}), {"_id": 0}), "verification case lookup")
+        if verification_case:
+            verification_plan = build_case_preinvalidation(verification_case,sorted(set(material_fields)&party_fields),user["id"],utc_now())
+            verification_update = verification_plan["update"]
+            verification_audit = await begin_audit(db.audit_events, user, "party_verification.material_change_invalidated", AuditEntityType.PARTY_VERIFICATION_CASE, verification_case["id"], changed_fields=material_fields+["status","version"], previous=verification_case)
+            if passport:
+                party_passport_plan=build_passport_preinvalidation(passport,verification_plan["effects"],user["id"],utc_now())
+                invalidation_plan={"required":True,"query":party_passport_plan["query"],"update":party_passport_plan["update"],"new_version":party_passport_plan["update"]["version"]}
+                if not invalidation_audit: invalidation_audit=await begin_audit(db.audit_events,user,"load_passport.material_change_invalidated",AuditEntityType.LOAD_PASSPORT,passport["id"],changed_fields=material_fields+["status","version"],previous=passport)
     audit = await begin_audit(db.audit_events, user, "load.updated", AuditEntityType.LOAD, lid, changed_fields=list(updates), previous=load)
+    if verification_audit:
+        vr = await audited_db(verification_audit, case_collection.update_one(tenant_filter(user,{"id":verification_case["id"],"status":"cleared","version":verification_case["version"]}),{"$set":verification_update}), "verification pre-invalidation")
+        if not vr.matched_count:
+            await verification_audit.rejected("version_conflict"); await audit.rejected("verification_version_conflict")
+            raise HTTPException(409,"Verification case changed concurrently; load was not updated")
+        await verification_audit.succeeded({"id":verification_case["id"],"status":"review_pending","version":verification_update["version"]})
     if invalidation_audit:
         invalidated = await audited_db(invalidation_audit, passport_collection.update_one(tenant_filter(user, invalidation_plan["query"]), {"$set": invalidation_plan["update"]}), "passport pre-invalidation")
         if not invalidated.matched_count:
@@ -530,13 +551,28 @@ async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
     doc = tenant_document(user, {"id": new_id("DOC"), **d.model_dump(mode="json"), "uploaded_at": now_iso(), "uploaded_by": user.get("name", user["id"])})
     passport_collection = getattr(db, "load_passports", None)
     passport = None; invalidation_audit = None; invalidation_plan = None
-    if d.doc_type.value == "rate_con" and passport_collection is not None:
+    verification_case = None; verification_plan = None; verification_audit = None
+    relevant_change = "rate_confirmation" if d.doc_type.value == "rate_con" else ("insurance_evidence" if is_insurance_document(doc) else None)
+    case_collection=getattr(db,"party_verification_cases",None)
+    if relevant_change and case_collection is not None:
+        verification_case = await case_collection.find_one(tenant_filter(user,{"load_id":d.load_id,"status":"cleared"}),{"_id":0})
+        if verification_case:
+            verification_plan=build_case_preinvalidation(verification_case,[relevant_change],user["id"],utc_now())
+            verification_audit=await begin_audit(db.audit_events,user,"party_verification.material_change_invalidated",AuditEntityType.PARTY_VERIFICATION_CASE,verification_case["id"],changed_fields=[relevant_change,"status","version"],previous=verification_case)
+    if relevant_change and passport_collection is not None:
         passport = await passport_collection.find_one(tenant_filter(user, {"load_id": d.load_id}), {"_id": 0})
         if passport:
-            invalidation_plan = build_preinvalidation(passport, ["rate_confirmation"], user["id"], utc_now())
+            invalidation_plan = build_preinvalidation(passport, ["rate_confirmation" if relevant_change=="rate_confirmation" else "insurance"], user["id"], utc_now())
+            if verification_plan:
+                pp=build_passport_preinvalidation(passport,verification_plan["effects"],user["id"],utc_now()); invalidation_plan={"required":True,"query":pp["query"],"update":pp["update"],"new_version":pp["update"]["version"]}
             if invalidation_plan["required"]:
                 invalidation_audit = await begin_audit(db.audit_events, user, "load_passport.material_change_invalidated", AuditEntityType.LOAD_PASSPORT, passport["id"], changed_fields=["rate_confirmation", "status", "version"], previous=passport)
     audit = await begin_audit(db.audit_events, user, "document.created", AuditEntityType.DOCUMENT, doc["id"], changed_fields=list(d.model_fields_set), previous={"load_id": d.load_id})
+    if verification_audit:
+        vr=await audited_db(verification_audit,case_collection.update_one(tenant_filter(user,verification_plan["query"]),{"$set":verification_plan["update"]}),"verification pre-invalidation")
+        if not vr.matched_count:
+            await verification_audit.rejected("version_conflict"); await audit.rejected("verification_version_conflict"); raise HTTPException(409,"Verification case changed concurrently; document was not created")
+        await verification_audit.succeeded({"id":verification_case["id"],"load_id":d.load_id,"status":"review_pending","version":verification_plan["update"]["version"]})
     if invalidation_audit:
         invalidated = await audited_db(invalidation_audit, passport_collection.update_one(tenant_filter(user, invalidation_plan["query"]), {"$set": invalidation_plan["update"]}), "passport pre-invalidation")
         if not invalidated.matched_count:
@@ -544,7 +580,7 @@ async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
             raise HTTPException(409, "Passport changed concurrently; document was not created")
         await invalidation_audit.succeeded({"id": passport["id"], "status": "review_pending", "version": invalidation_plan["new_version"]})
     await audited_db(audit, db.documents.insert_one(doc), "document create"); clean_doc(doc); await audit.succeeded(doc)
-    if invalidation_audit:
+    if invalidation_audit and d.doc_type.value == "rate_con":
         synchronization = {"rate_confirmation": {"document_id": doc["id"], "rate_confirmation_number": "", "filename": doc["filename"], "document_type": "rate_con", "captured_at": utc_now()}, "evidence_document_ids": sorted(set(passport.get("evidence_document_ids", [])) | {doc["id"]})}
         try:
             await passport_collection.update_one(tenant_filter(user, {"id": passport["id"], "version": invalidation_plan["new_version"], "status": "review_pending"}), {"$set": synchronization})
@@ -1203,6 +1239,7 @@ class _DynamicDBProxy:
 
 register_passport_routes(api, _DynamicDBProxy(), get_current_user)
 register_rate_confirmation_routes(api, _DynamicDBProxy(), get_current_user)
+register_party_verification_routes(api, _DynamicDBProxy(), get_current_user)
 
 @public_api.get("/")
 async def root():

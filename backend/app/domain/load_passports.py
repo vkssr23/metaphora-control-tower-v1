@@ -16,6 +16,9 @@ CHANGE_CHECKPOINTS = {
     "appointment": {"load_details", "appointment_feasibility"},
     "assignment": {"load_details", "driver_eligibility", "truck_eligibility"},
     "trailer": {"load_details", "trailer_eligibility"},
+    "party_verification": {"broker_identity", "shipper_identity", "pickup_instructions"},
+    "pickup_instructions": {"pickup_instructions"},
+    "insurance": set(),
 }
 def utc_now(): return datetime.now(timezone.utc).isoformat()
 def bounded_load_snapshot(load: Mapping[str,Any]):
@@ -51,6 +54,7 @@ def material_categories(fields):
     if fields & {"pickup_address","pickup_city","pickup_state","pickup_zip","pickup_appt","delivery_address","delivery_city","delivery_state","delivery_zip","delivery_appt"}: categories.add("appointment")
     if fields & {"driver_id","truck_id"}: categories.add("assignment")
     if "rate_con_number" in fields: categories.add("rate_confirmation")
+    if fields & {"equipment_type","commodity","weight","pickup_address","pickup_city","pickup_state","pickup_zip","pickup_appt","driver_id","truck_id"}: categories.add("pickup_instructions")
     return sorted(categories)
 def material_drift(passport, load):
     snap=passport.get("load_snapshot",{}); drift=[f for f in MATERIAL_LOAD_FIELDS-{"driver_id","truck_id"} if snap.get(f)!=load.get(f) and (f in snap or f in load)]
