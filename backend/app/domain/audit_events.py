@@ -51,6 +51,13 @@ ALLOWED_ACTIONS = {
     "pickup_release.driver_acknowledged", "pickup_release.pickup_confirmed", "pickup_release.exception_opened",
     "pickup_release.blocked", "pickup_release.returned_to_review", "pickup_release.revoked",
     "pickup_release.material_change_invalidated", "pickup_release.custody_event_appended",
+    "execution_session.started", "execution_session.progress_reported", "execution_session.paused",
+    "execution_session.resumed", "execution_session.stop_arrived", "execution_session.stop_departed",
+    "execution_session.detention_started", "execution_session.detention_ended", "execution_session.eta_evaluated",
+    "execution_session.delivery_arrived", "execution_session.delivery_confirmed", "execution_session.completed",
+    "execution_session.plan_amended", "execution_session.material_change_detected",
+    "execution_exception.created", "execution_exception.acknowledged", "execution_exception.assigned",
+    "execution_exception.escalated", "execution_exception.resolved", "execution_exception.waived",
 }
 SAFE_FIELDS = {
     "id", "truck_number", "status", "assigned_driver_id", "assigned_truck_id",
@@ -65,6 +72,7 @@ SAFE_FIELDS = {
     "extraction_id", "document_id", "revision", "discrepancy_id", "discrepancy_type",
     "case_id", "review_domain", "finding_id", "risk_level", "signal_type", "release_case_id",
     "trailer_identifier", "custody_event_type", "changed_fields",
+    "execution_state", "execution_health", "exception_id", "severity", "owner_role",
 }
 SENSITIVE = re.compile(r"password|secret|token|credential|authorization|api.?key|database|mongo|jwt|header|body|content", re.I)
 MAX_FIELDS = 32

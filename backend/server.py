@@ -23,9 +23,11 @@ from app.rate_confirmation_routes import register_rate_confirmation_routes
 from app.party_verification_routes import register_party_verification_routes
 from app.execution_eligibility_routes import register_execution_eligibility_routes
 from app.pickup_release_routes import register_pickup_release_routes
+from app.in_transit_execution_routes import register_in_transit_execution_routes
 from app.pickup_release_invalidation import preinvalidate_pickup_release, preinvalidate_pickup_for_execution_snapshot
 from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation, is_insurance_document
 from app.execution_invalidation import preinvalidate_for_load, preinvalidate_for_snapshot
+from app.execution_material_change import control_material_load_change
 from app.domain.execution_eligibility import DRIVER_MATERIAL_FIELDS, TRUCK_MATERIAL_FIELDS
 from app.schemas import (
     AiChatRequest, AssumptionUpdate, DocumentCreate, DriverAlertRequest, DriverCreate,
@@ -442,6 +444,7 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
             await invalidation_audit.rejected("version_conflict"); await audit.rejected("passport_version_conflict")
             raise HTTPException(409, "Passport changed concurrently; load was not updated")
         await invalidation_audit.succeeded({"id": passport["id"], "status": "review_pending", "version": invalidation_plan["new_version"]})
+    await control_material_load_change(db,user,load,updates)
     result = await audited_db(audit, db.loads.update_one(tenant_filter(user, {"id": lid}), {"$set": updates}), "load update")
     if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
     await audit.succeeded(updates)
@@ -1274,6 +1277,7 @@ register_rate_confirmation_routes(api, _DynamicDBProxy(), get_current_user)
 register_party_verification_routes(api, _DynamicDBProxy(), get_current_user)
 register_execution_eligibility_routes(api, _DynamicDBProxy(), get_current_user)
 register_pickup_release_routes(api, _DynamicDBProxy(), get_current_user)
+register_in_transit_execution_routes(api, _DynamicDBProxy(), get_current_user)
 
 @public_api.get("/")
 async def root():
