@@ -44,6 +44,13 @@ ALLOWED_ACTIONS = {
     "party_verification.returned_to_review", "party_verification.expired",
     "party_verification.revoked", "party_verification.material_change_invalidated",
     "party_verification.passport_synchronized",
+    "pickup_release.created", "pickup_release.updated", "pickup_release.snapshots_refreshed",
+    "pickup_release.evaluated", "pickup_release.submitted", "pickup_release.checklist_updated",
+    "pickup_release.finding_resolved", "pickup_release.evidence_added", "pickup_release.release_ready",
+    "pickup_release.released", "pickup_release.authorization_issued", "pickup_release.authorization_revoked",
+    "pickup_release.driver_acknowledged", "pickup_release.pickup_confirmed", "pickup_release.exception_opened",
+    "pickup_release.blocked", "pickup_release.returned_to_review", "pickup_release.revoked",
+    "pickup_release.material_change_invalidated", "pickup_release.custody_event_appended",
 }
 SAFE_FIELDS = {
     "id", "truck_number", "status", "assigned_driver_id", "assigned_truck_id",
@@ -56,7 +63,8 @@ SAFE_FIELDS = {
     "min_net_profit", "count", "force",
     "passport_id", "version", "checkpoint_type", "reason_code", "pickup_authorization_id",
     "extraction_id", "document_id", "revision", "discrepancy_id", "discrepancy_type",
-    "case_id", "review_domain", "finding_id", "risk_level", "signal_type",
+    "case_id", "review_domain", "finding_id", "risk_level", "signal_type", "release_case_id",
+    "trailer_identifier", "custody_event_type", "changed_fields",
 }
 SENSITIVE = re.compile(r"password|secret|token|credential|authorization|api.?key|database|mongo|jwt|header|body|content", re.I)
 MAX_FIELDS = 32

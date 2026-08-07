@@ -22,6 +22,8 @@ from app.passport_routes import register_passport_routes
 from app.rate_confirmation_routes import register_rate_confirmation_routes
 from app.party_verification_routes import register_party_verification_routes
 from app.execution_eligibility_routes import register_execution_eligibility_routes
+from app.pickup_release_routes import register_pickup_release_routes
+from app.pickup_release_invalidation import preinvalidate_pickup_release, preinvalidate_pickup_for_execution_snapshot
 from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation, is_insurance_document
 from app.execution_invalidation import preinvalidate_for_load, preinvalidate_for_snapshot
 from app.domain.execution_eligibility import DRIVER_MATERIAL_FIELDS, TRUCK_MATERIAL_FIELDS
@@ -304,6 +306,7 @@ async def update_truck(tid: str, data: TruckUpdate, user=Depends(safety_write)):
     updates["updated_at"] = now_iso()
     audit = await begin_audit(db.audit_events, user, "truck.updated", AuditEntityType.TRUCK, tid, changed_fields=list(updates), previous=previous)
     if set(updates) & TRUCK_MATERIAL_FIELDS:
+        await preinvalidate_pickup_for_execution_snapshot(db,user,"truck_snapshot",tid,["truck"])
         await preinvalidate_for_snapshot(db, user, "truck_snapshot", tid, ["truck"] + (["equipment"] if "equipment_type" in updates else []))
     result = await audited_db(audit, db.trucks.update_one(tenant_filter(user, {"id": tid}), {"$set": updates}), "truck update")
     if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
@@ -341,6 +344,7 @@ async def update_driver(did: str, data: DriverUpdate, user=Depends(safety_write)
     if "assigned_truck_id" in updates: await require_tenant_reference(db.trucks, user, updates["assigned_truck_id"], "assigned truck")
     audit = await begin_audit(db.audit_events, user, "driver.updated", AuditEntityType.DRIVER, did, changed_fields=list(updates), previous=previous)
     if set(updates) & DRIVER_MATERIAL_FIELDS:
+        await preinvalidate_pickup_for_execution_snapshot(db,user,"driver_snapshot",did,["driver"])
         await preinvalidate_for_snapshot(db, user, "driver_snapshot", did, ["driver"])
     result = await audited_db(audit, db.drivers.update_one(tenant_filter(user, {"id": did}), {"$set": updates}), "driver update")
     if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
@@ -390,6 +394,8 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
     if "miles" in updates or "rate" in updates:
         updates["rpm"] = round(rate / miles, 2) if miles > 0 and rate > 0 else 0
     material_fields = sorted(set(updates) & MATERIAL_LOAD_FIELDS)
+    audit = await begin_audit(db.audit_events, user, "load.updated", AuditEntityType.LOAD, lid, changed_fields=list(updates), previous=load)
+    if material_fields: await preinvalidate_pickup_release(db,user,lid,material_fields)
     passport = None; invalidation_audit = None; invalidation_plan = None
     verification_case = None; verification_audit = None; verification_update = None
     passport_collection = getattr(db, "load_passports", None)
@@ -411,7 +417,6 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
                 party_passport_plan=build_passport_preinvalidation(passport,verification_plan["effects"],user["id"],utc_now())
                 invalidation_plan={"required":True,"query":party_passport_plan["query"],"update":party_passport_plan["update"],"new_version":party_passport_plan["update"]["version"]}
                 if not invalidation_audit: invalidation_audit=await begin_audit(db.audit_events,user,"load_passport.material_change_invalidated",AuditEntityType.LOAD_PASSPORT,passport["id"],changed_fields=material_fields+["status","version"],previous=passport)
-    audit = await begin_audit(db.audit_events, user, "load.updated", AuditEntityType.LOAD, lid, changed_fields=list(updates), previous=load)
     execution_changes=[]
     if set(updates)&{"driver_id"}: execution_changes.append("driver_assignment")
     if set(updates)&{"truck_id"}: execution_changes.append("truck_assignment")
@@ -424,6 +429,7 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
     if execution_cases and invalidation_plan:
         passport=await passport_collection.find_one(tenant_filter(user,{"id":passport["id"]}),{"_id":0})
         invalidation_plan=build_preinvalidation(passport,material_categories(material_fields),user["id"],utc_now())
+        if not invalidation_plan.get("required"): invalidation_plan=None; invalidation_audit=None
     if verification_audit:
         vr = await audited_db(verification_audit, case_collection.update_one(tenant_filter(user,{"id":verification_case["id"],"status":"cleared","version":verification_case["version"]}),{"$set":verification_update}), "verification pre-invalidation")
         if not vr.matched_count:
@@ -1267,6 +1273,7 @@ register_passport_routes(api, _DynamicDBProxy(), get_current_user)
 register_rate_confirmation_routes(api, _DynamicDBProxy(), get_current_user)
 register_party_verification_routes(api, _DynamicDBProxy(), get_current_user)
 register_execution_eligibility_routes(api, _DynamicDBProxy(), get_current_user)
+register_pickup_release_routes(api, _DynamicDBProxy(), get_current_user)
 
 @public_api.get("/")
 async def root():
