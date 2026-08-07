@@ -8,6 +8,8 @@ TRANSITIONS={
  "delivery_confirmed":{"completed","exception"},"completed":set(),"cancelled":set(),
 }
 TERMINAL={"completed","cancelled"}
+EXECUTION_SESSION_STATUSES=frozenset(TRANSITIONS)
+CURRENT_EXECUTION_SESSION_STATUSES=EXECUTION_SESSION_STATUSES-frozenset(TERMINAL)
 MATERIAL_CONTROL_ACTIVE={"active","paused","exception","delivery_arrived"}
 FUTURE_SOURCES={"system","future_driver_app","future_telematics","future_eld","future_broker_tracking","future_shipper_tracking","future_weather","future_maps"}
 MATERIAL_FIELD_DOMAINS={"driver_id":"assignment","truck_id":"assignment","trailer_identifier":"assignment","delivery_address":"delivery","delivery_city":"delivery","delivery_state":"delivery","delivery_zip":"delivery","delivery_appt":"delivery","pickup_address":"appointment","pickup_city":"appointment","pickup_state":"appointment","pickup_zip":"appointment","pickup_appt":"appointment","equipment_type":"equipment","commodity":"commodity","weight":"cargo","miles":"mileage","deadhead_miles":"mileage","est_drive_hours":"mileage","stage":"stage"}

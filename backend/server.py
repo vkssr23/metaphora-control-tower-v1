@@ -16,6 +16,8 @@ from app.domain.audit_events import incomplete_operations
 from app.schemas.audit import AuditEntityType, AuditOutcome, AuditSource
 from app.security import authenticated_user_dependency, create_token, public_user
 from app.tenant import new_tenant_id, tenant_document, tenant_filter, require_tenant_id, require_tenant_reference
+from app.observability import RequestContextMiddleware
+from app.production_integrity import evaluate_environment, evaluate_production_readiness
 from app.domain.load_transitions import transition_allowed
 from app.domain.load_passports import MATERIAL_LOAD_FIELDS, bounded_load_snapshot, build_preinvalidation, material_categories, utc_now
 from app.passport_routes import register_passport_routes
@@ -1291,8 +1293,19 @@ register_invoice_readiness_routes(api, _DynamicDBProxy(), get_current_user)
 async def root():
     return {"app": "Metaphora Control Tower", "status": "operational", "time": now_iso()}
 
+@public_api.get("/health/live")
+async def health_live(_user=Depends(get_current_user)):
+    return {"status":"alive"}
+
+@public_api.get("/health/ready")
+async def health_ready(_user=Depends(get_current_user)):
+    environment=evaluate_environment(os.environ)
+    result=evaluate_production_readiness(environment)
+    return {"status":"configured" if result["critical_blockers"]==0 else "not_ready", "production_integrity":"not_certified"}
+
 app.include_router(public_api)
 app.include_router(api)
+app.add_middleware(RequestContextMiddleware)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
     allow_origins=settings.cors_origins,
     allow_methods=["*"], allow_headers=["*"])
