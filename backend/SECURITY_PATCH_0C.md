@@ -104,3 +104,7 @@ updates and immutable existing tenant IDs make that rerun idempotent.
 - Unique `(tenant_id, id)` on assumptions, yielding one `id=default` per tenant
 
 No index or migration is applied on startup or in tests.
+
+Patch 0D note: this migration must not assign tenant IDs to, rewrite, or backfill
+`audit_events`. Legacy `activity` remains readable under its existing tenant scope;
+historical conversion requires a separate reviewed evidence-preservation plan.

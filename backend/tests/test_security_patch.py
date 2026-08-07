@@ -84,6 +84,7 @@ class FakeDB:
         self.users = FakeCollection(users)
         self.loads = FakeCollection(loads)
         self.activity = FakeCollection()
+        self.audit_events = FakeCollection()
         self.trucks = FakeCollection()
         self.drivers = FakeCollection()
         self.documents = FakeCollection()
