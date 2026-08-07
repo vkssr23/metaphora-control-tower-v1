@@ -6,6 +6,7 @@ from app.schemas.audit import AuditEntityType
 from app.tenant import tenant_filter, tenant_document
 from app.domain.party_verification import DOMAINS, now, snapshots, evaluate, assert_mutable, qualified_insurance_documents, rate_confirmation_required
 from app.schemas.party_verification import CaseCreate,CaseUpdate,EmptyAction,ReasonAction,ReviewUpdate,FindingUpdate,EvidenceAdd,ReviewDomain,ReviewResult,FindingResolution
+from app.execution_invalidation import preinvalidate_for_load
 
 ADMIN={"owner","admin"}; OPS=ADMIN|{"operations","dispatcher"}; DOMAIN_ROLES={"broker_identity":OPS,"shipper_identity":OPS,"contact_validation":OPS|{"finance"},"pickup_instructions":OPS,"carrier_authority":ADMIN|{"safety","compliance"},"insurance_evidence":ADMIN|{"safety","compliance","finance"},"fraud_risk":ADMIN|{"safety","compliance","finance"}}
 ALLOWED={"draft":{"review_pending"},"review_pending":{"findings_open","cleared","blocked"},"findings_open":{"review_pending","cleared","blocked"},"blocked":{"review_pending"},"cleared":{"expired","revoked"},"expired":{"review_pending"},"revoked":{"review_pending"}}
@@ -101,15 +102,15 @@ def register_party_verification_routes(api,db,get_current_user):
     @api.post("/party-verification-cases/{cid}/evaluate")
     async def evaluate_case(cid:str,data:EmptyAction,user=Depends(get_current_user)):
         role(user,OPS|{"safety","compliance","finance"}); c=await one(db,user,cid); mutable(c,"evaluate"); load,p,rate,docs,tenant=await related(db,user,c["load_id"]); fs,risk=evaluate(c,load,rate); target="findings_open" if c["status"]=="review_pending" and any(f["status"]=="open" for f in fs) else c["status"]; u={"findings":fs,"risk_signals":risk["signals"],"risk_summary":risk,"unresolved_finding_ids":[f["id"] for f in fs if f["status"]=="open"],"blocking_reasons":risk["blocking_reasons"],"status":target}; a=await begin_audit(db.audit_events,user,"party_verification.evaluated",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["findings","risk_summary","status","version"],previous=c); return await replace(db,a,user,c,u)
-    async def transition(cid,user,target,action,reason=""):
-        c=await one(db,user,cid)
+    async def transition(cid,user,target,action,reason="",observed=None,audit=None):
+        c=observed or await one(db,user,cid)
         if target not in ALLOWED.get(c["status"],set()): raise HTTPException(409,f"Transition from {c['status']} to {target} is not allowed")
         u={"status":target}; ts=now()
         if target=="review_pending": u.update({"submitted_at":ts,"submitted_by":user["id"],"block_reason":"","cleared_at":None,"cleared_by":None})
         if target=="blocked": u.update({"blocked_at":ts,"blocked_by":user["id"],"block_reason":reason})
         if target=="expired": u.update({"cleared_at":None,"cleared_by":None,"blocking_reasons":["clearance_expired"]})
         if target=="revoked": u.update({"revoked_at":ts,"revoked_by":user["id"],"revocation_reason":reason,"cleared_at":None,"cleared_by":None,"blocking_reasons":["clearance_revoked"]})
-        a=await begin_audit(db.audit_events,user,action,AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=list(u)+["version"],previous=c); return await replace(db,a,user,c,u)
+        a=audit or await begin_audit(db.audit_events,user,action,AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=list(u)+["version"],previous=c); return await replace(db,a,user,c,u)
     @api.post("/party-verification-cases/{cid}/submit")
     async def submit(cid:str,data:EmptyAction,user=Depends(get_current_user)): role(user,OPS); return await transition(cid,user,"review_pending","party_verification.submitted")
     @api.put("/party-verification-cases/{cid}/reviews/{domain}")
@@ -157,12 +158,21 @@ def register_party_verification_routes(api,db,get_current_user):
         await a.succeeded({"id":c["id"],"load_id":c["load_id"],"status":"cleared","version":updates["version"],"passport_id":p["id"]}); return await one(db,user,c["id"])
     @api.post("/party-verification-cases/{cid}/block")
     async def block(cid:str,data:ReasonAction,user=Depends(get_current_user)):
-        role(user,ADMIN); out=await transition(cid,user,"blocked","party_verification.blocked",data.reason); await sync_passport(user,out,False); return out
+        role(user,ADMIN); current=await one(db,user,cid)
+        if "blocked" not in ALLOWED.get(current["status"],set()): raise HTTPException(409,f"Transition from {current['status']} to blocked is not allowed")
+        parent=await begin_audit(db.audit_events,user,"party_verification.blocked",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["status","version"],previous=current)
+        await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"blocked","party_verification.blocked",data.reason,current,parent); await sync_passport(user,out,False); return out
     @api.post("/party-verification-cases/{cid}/return-to-review")
     async def return_review(cid:str,data:EmptyAction,user=Depends(get_current_user)): role(user,ADMIN); return await transition(cid,user,"review_pending","party_verification.returned_to_review")
     @api.post("/party-verification-cases/{cid}/expire")
     async def expire(cid:str,data:EmptyAction,user=Depends(get_current_user)):
-        role(user,ADMIN); out=await transition(cid,user,"expired","party_verification.expired"); await sync_passport(user,out,False); return out
+        role(user,ADMIN); current=await one(db,user,cid)
+        if "expired" not in ALLOWED.get(current["status"],set()): raise HTTPException(409,f"Transition from {current['status']} to expired is not allowed")
+        parent=await begin_audit(db.audit_events,user,"party_verification.expired",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["status","version"],previous=current)
+        await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"expired","party_verification.expired","",current,parent); await sync_passport(user,out,False); return out
     @api.post("/party-verification-cases/{cid}/revoke")
     async def revoke(cid:str,data:ReasonAction,user=Depends(get_current_user)):
-        role(user,ADMIN); out=await transition(cid,user,"revoked","party_verification.revoked",data.reason); await sync_passport(user,out,False); return out
+        role(user,ADMIN); current=await one(db,user,cid)
+        if "revoked" not in ALLOWED.get(current["status"],set()): raise HTTPException(409,f"Transition from {current['status']} to revoked is not allowed")
+        parent=await begin_audit(db.audit_events,user,"party_verification.revoked",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["status","version"],previous=current)
+        await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"revoked","party_verification.revoked",data.reason,current,parent); await sync_passport(user,out,False); return out
