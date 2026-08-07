@@ -19,6 +19,7 @@ from app.tenant import new_tenant_id, tenant_document, tenant_filter, require_te
 from app.domain.load_transitions import transition_allowed
 from app.domain.load_passports import MATERIAL_LOAD_FIELDS, bounded_load_snapshot, build_preinvalidation, material_categories, utc_now
 from app.passport_routes import register_passport_routes
+from app.rate_confirmation_routes import register_rate_confirmation_routes
 from app.schemas import (
     AiChatRequest, AssumptionUpdate, DocumentCreate, DriverAlertRequest, DriverCreate,
     DriverUpdate, InvoiceCreate, InvoiceUpdate, LoadAnalysisRequest, LoadCreate,
@@ -1201,6 +1202,7 @@ class _DynamicDBProxy:
     def __getattr__(self, name): return getattr(db, name)
 
 register_passport_routes(api, _DynamicDBProxy(), get_current_user)
+register_rate_confirmation_routes(api, _DynamicDBProxy(), get_current_user)
 
 @public_api.get("/")
 async def root():
