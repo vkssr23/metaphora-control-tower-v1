@@ -29,3 +29,11 @@ def require_owner(current_user: Callable[..., Any]):
             raise HTTPException(status_code=403, detail="Owner permission required")
         return user
     return authorize
+
+
+def require_audit_reader(current_user: Callable[..., Any]):
+    async def authorize(user: dict = Depends(current_user)) -> dict:
+        if user.get("role") not in {"owner", "admin"}:
+            raise HTTPException(status_code=403, detail="Audit reader permission required")
+        return user
+    return authorize

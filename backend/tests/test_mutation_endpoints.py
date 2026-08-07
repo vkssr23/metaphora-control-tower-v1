@@ -46,7 +46,7 @@ class Collection:
 
 class FakeDB:
     def __init__(self):
-        for name in ("users","tenants","loads","activity","trucks","drivers","documents","invoices","assumptions"):
+        for name in ("users","tenants","loads","activity","audit_events","trucks","drivers","documents","invoices","assumptions"):
             setattr(self, name, Collection())
 
 @pytest.fixture
@@ -114,7 +114,7 @@ def test_alert_actor_and_role_policy(api):
     role("operations")
     assert client.post("/api/alerts/generate", json={"load_id":"L1","alert_type":"road","dispatcher":"spoof"}).status_code==422
     response=client.post("/api/alerts/generate", json={"load_id":"L1","alert_type":"road","message":"test"})
-    assert response.status_code==200 and db.activity.docs[-1]["updated_by"]=="Authenticated Actor"
+    assert response.status_code==200 and db.audit_events.docs[-1]["actor_id"]=="U-operations"
     for denied in ("viewer","safety","finance"):
         role(denied); assert client.post("/api/alerts/generate", json={"load_id":"L1","alert_type":"road"}).status_code==403
 
@@ -154,11 +154,11 @@ def test_database_errors_are_sanitized(api):
     assert response.status_code==500 and response.json()=={"detail":"Database operation failed"}
     assert "mongodb" not in response.text.lower() and "collection" not in response.text.lower()
 
-def test_document_activity_failure_does_not_false_fail_primary_write(api, caplog):
-    client, db, role=api; role("operations"); db.loads.docs=[{"id":"L1","tenant_id":VALID_TENANT}]; db.activity.fail=True
+def test_document_creates_terminal_audit_without_legacy_activity(api):
+    client, db, role=api; role("operations"); db.loads.docs=[{"id":"L1","tenant_id":VALID_TENANT}]
     response=client.post("/api/documents", json={"load_id":"L1","doc_type":"pod","filename":"pod.pdf","url":"mock://pod.pdf"})
     assert response.status_code==200 and db.documents.docs[-1]["filename"]=="pod.pdf"
-    assert "Activity logging failed after successful primary write" in caplog.text
+    assert [e["phase"] for e in db.audit_events.docs]==["started","succeeded"] and db.activity.docs==[]
 
 def test_corrected_frontend_payloads(api):
     client, db, role=api

@@ -1,5 +1,5 @@
 """Metaphora Control Tower - Freight Operations Backend"""
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -10,9 +10,12 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from app.config import Settings, force_seed_allowed
-from app.permissions import require_capability, require_owner
+from app.permissions import require_capability, require_owner, require_audit_reader
+from app.audit import begin_audit
+from app.domain.audit_events import incomplete_operations
+from app.schemas.audit import AuditEntityType, AuditOutcome, AuditSource
 from app.security import authenticated_user_dependency, create_token, public_user
-from app.tenant import new_tenant_id, tenant_document, tenant_filter, require_tenant_reference
+from app.tenant import new_tenant_id, tenant_document, tenant_filter, require_tenant_id, require_tenant_reference
 from app.domain.load_transitions import transition_allowed
 from app.schemas import (
     AiChatRequest, AssumptionUpdate, DocumentCreate, DriverAlertRequest, DriverCreate,
@@ -57,6 +60,14 @@ async def safe_db(awaitable, operation):
         logging.error("Database operation failed during %s", operation)
         raise HTTPException(500, "Database operation failed")
 
+async def audited_db(audit, awaitable, operation):
+    try:
+        return await safe_db(awaitable, operation)
+    except HTTPException as exc:
+        if exc.status_code < 500: await audit.rejected("operation_rejected")
+        else: await audit.failed("internal_failure")
+        raise
+
 # ============ AUTH ============
 class LoginIn(BaseModel):
     email: EmailStr
@@ -93,6 +104,7 @@ safety_write = require_capability(get_current_user, "safety")
 finance_write = require_capability(get_current_user, "finance")
 ai_access = require_capability(get_current_user, "ai")
 owner_only = require_owner(get_current_user)
+audit_reader = require_audit_reader(get_current_user)
 
 
 async def find_user_by_email(email: str):
@@ -138,6 +150,12 @@ async def signup(data: SignupIn):
         await safe_db(db.assumptions.insert_one(defaults), "tenant defaults create")
     except HTTPException:
         logging.error("Signup assumptions initialization failed")
+    try:
+        signup_audit = await begin_audit(db.audit_events, user, "tenant.signup_created", AuditEntityType.TENANT,
+                                         tenant["id"], changed_fields=[], source=AuditSource.SIGNUP)
+        await signup_audit.succeeded({"id": tenant["id"]})
+    except HTTPException:
+        logging.warning("Signup audit event could not be recorded")
     safe_user = public_user(user)
     return {"token": create_token(safe_user, settings.jwt_secret), "user": safe_user}
 
@@ -264,23 +282,32 @@ async def list_trucks(user=Depends(get_current_user)):
 async def create_truck(t: TruckCreate, user=Depends(safety_write)):
     await require_tenant_reference(db.drivers, user, t.assigned_driver_id, "assigned driver")
     d = tenant_document(user, {"id": new_id("T"), **t.model_dump(mode="json"), "profit_per_mile": 0, "created_at": now_iso()})
-    await safe_db(db.trucks.insert_one(d), "truck create"); clean_doc(d)
+    audit = await begin_audit(db.audit_events, user, "truck.created", AuditEntityType.TRUCK, d["id"], changed_fields=list(t.model_fields_set))
+    await audited_db(audit, db.trucks.insert_one(d), "truck create")
+    clean_doc(d); await audit.succeeded(d)
     return d
 
 @api.put("/trucks/{tid}")
 async def update_truck(tid: str, data: TruckUpdate, user=Depends(safety_write)):
-    if not await safe_db(db.trucks.find_one(tenant_filter(user, {"id": tid}), {"_id": 0}), "truck lookup"): raise HTTPException(404, "Not found")
+    previous = await safe_db(db.trucks.find_one(tenant_filter(user, {"id": tid}), {"_id": 0}), "truck lookup")
+    if not previous: raise HTTPException(404, "Not found")
     updates = data.model_dump(mode="json", exclude_unset=True)
     if "assigned_driver_id" in updates: await require_tenant_reference(db.drivers, user, updates["assigned_driver_id"], "assigned driver")
     updates["updated_at"] = now_iso()
-    result = await safe_db(db.trucks.update_one(tenant_filter(user, {"id": tid}), {"$set": updates}), "truck update")
-    if not result.matched_count: raise HTTPException(404, "Not found")
+    audit = await begin_audit(db.audit_events, user, "truck.updated", AuditEntityType.TRUCK, tid, changed_fields=list(updates), previous=previous)
+    result = await audited_db(audit, db.trucks.update_one(tenant_filter(user, {"id": tid}), {"$set": updates}), "truck update")
+    if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
+    await audit.succeeded(updates)
     return {"ok": True}
 
 @api.delete("/trucks/{tid}")
 async def delete_truck(tid: str, user=Depends(safety_write)):
-    result = await safe_db(db.trucks.delete_one(tenant_filter(user, {"id": tid})), "truck delete")
-    if not result.deleted_count: raise HTTPException(404, "Not found")
+    previous = await safe_db(db.trucks.find_one(tenant_filter(user, {"id": tid}), {"_id": 0}), "truck lookup")
+    if not previous: raise HTTPException(404, "Not found")
+    audit = await begin_audit(db.audit_events, user, "truck.deleted", AuditEntityType.TRUCK, tid, previous=previous)
+    result = await audited_db(audit, db.trucks.delete_one(tenant_filter(user, {"id": tid})), "truck delete")
+    if not result.deleted_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
+    await audit.succeeded()
     return {"ok": True}
 
 # ============ DRIVERS ============
@@ -291,22 +318,31 @@ async def list_drivers(user=Depends(get_current_user)):
 @api.post("/drivers")
 async def create_driver(d: DriverCreate, user=Depends(safety_write)):
     await require_tenant_reference(db.trucks, user, d.assigned_truck_id, "assigned truck")
-    doc = tenant_document(user, {"id": new_id("D"), **d.model_dump(mode="json"), "created_at": now_iso()}); await safe_db(db.drivers.insert_one(doc), "driver create"); clean_doc(doc)
+    doc = tenant_document(user, {"id": new_id("D"), **d.model_dump(mode="json"), "created_at": now_iso()})
+    audit = await begin_audit(db.audit_events, user, "driver.created", AuditEntityType.DRIVER, doc["id"], changed_fields=list(d.model_fields_set))
+    await audited_db(audit, db.drivers.insert_one(doc), "driver create"); clean_doc(doc); await audit.succeeded(doc)
     return doc
 
 @api.put("/drivers/{did}")
 async def update_driver(did: str, data: DriverUpdate, user=Depends(safety_write)):
-    if not await safe_db(db.drivers.find_one(tenant_filter(user, {"id": did}), {"_id": 0}), "driver lookup"): raise HTTPException(404, "Not found")
+    previous = await safe_db(db.drivers.find_one(tenant_filter(user, {"id": did}), {"_id": 0}), "driver lookup")
+    if not previous: raise HTTPException(404, "Not found")
     updates = data.model_dump(mode="json", exclude_unset=True); updates["updated_at"] = now_iso()
     if "assigned_truck_id" in updates: await require_tenant_reference(db.trucks, user, updates["assigned_truck_id"], "assigned truck")
-    result = await safe_db(db.drivers.update_one(tenant_filter(user, {"id": did}), {"$set": updates}), "driver update")
-    if not result.matched_count: raise HTTPException(404, "Not found")
+    audit = await begin_audit(db.audit_events, user, "driver.updated", AuditEntityType.DRIVER, did, changed_fields=list(updates), previous=previous)
+    result = await audited_db(audit, db.drivers.update_one(tenant_filter(user, {"id": did}), {"$set": updates}), "driver update")
+    if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
+    await audit.succeeded(updates)
     return {"ok": True}
 
 @api.delete("/drivers/{did}")
 async def delete_driver(did: str, user=Depends(safety_write)):
-    result = await safe_db(db.drivers.delete_one(tenant_filter(user, {"id": did})), "driver delete")
-    if not result.deleted_count: raise HTTPException(404, "Not found")
+    previous = await safe_db(db.drivers.find_one(tenant_filter(user, {"id": did}), {"_id": 0}), "driver lookup")
+    if not previous: raise HTTPException(404, "Not found")
+    audit = await begin_audit(db.audit_events, user, "driver.deleted", AuditEntityType.DRIVER, did, previous=previous)
+    result = await audited_db(audit, db.drivers.delete_one(tenant_filter(user, {"id": did})), "driver delete")
+    if not result.deleted_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
+    await audit.succeeded()
     return {"ok": True}
 
 # ============ LOADS ============
@@ -326,8 +362,8 @@ async def create_load(l: LoadCreate, user=Depends(operational_write)):
     await require_tenant_reference(db.trucks, user, l.truck_id, "truck")
     d = tenant_document(user, {"id": new_id("L"), **l.model_dump(mode="json"), "dispatcher": user.get("name", user["id"]), "stage": "Booked", "bol_status": "Pending", "pod_status": "Pending", "invoice_status": "Not Ready", "payment_status": "Pending", "created_at": now_iso(), "updated_at": now_iso()})
     d["rpm"] = round(d["rate"] / d["miles"], 2) if d["miles"] > 0 and d["rate"] > 0 else 0
-    await safe_db(db.loads.insert_one(d), "load create"); clean_doc(d)
-    await log_activity_best_effort(user, d["id"], "Load Created", "", "Booked", user.get("name", user["id"]), "Load created")
+    audit = await begin_audit(db.audit_events, user, "load.created", AuditEntityType.LOAD, d["id"], changed_fields=list(l.model_fields_set))
+    await audited_db(audit, db.loads.insert_one(d), "load create"); clean_doc(d); await audit.succeeded(d)
     return d
 
 @api.put("/loads/{lid}")
@@ -341,14 +377,20 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
     miles, rate = updates.get("miles", load.get("miles", 0)), updates.get("rate", load.get("rate", 0))
     if "miles" in updates or "rate" in updates:
         updates["rpm"] = round(rate / miles, 2) if miles > 0 and rate > 0 else 0
-    result = await safe_db(db.loads.update_one(tenant_filter(user, {"id": lid}), {"$set": updates}), "load update")
-    if not result.matched_count: raise HTTPException(404, "Not found")
+    audit = await begin_audit(db.audit_events, user, "load.updated", AuditEntityType.LOAD, lid, changed_fields=list(updates), previous=load)
+    result = await audited_db(audit, db.loads.update_one(tenant_filter(user, {"id": lid}), {"$set": updates}), "load update")
+    if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
+    await audit.succeeded(updates)
     return {"ok": True}
 
 @api.delete("/loads/{lid}")
 async def delete_load(lid: str, user=Depends(operational_write)):
-    result = await safe_db(db.loads.delete_one(tenant_filter(user, {"id": lid})), "load delete")
-    if not result.deleted_count: raise HTTPException(404, "Not found")
+    previous = await safe_db(db.loads.find_one(tenant_filter(user, {"id": lid}), {"_id": 0}), "load lookup")
+    if not previous: raise HTTPException(404, "Not found")
+    audit = await begin_audit(db.audit_events, user, "load.deleted", AuditEntityType.LOAD, lid, previous=previous)
+    result = await audited_db(audit, db.loads.delete_one(tenant_filter(user, {"id": lid})), "load delete")
+    if not result.deleted_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
+    await audit.succeeded()
     return {"ok": True}
 
 @api.post("/loads/{lid}/stage")
@@ -378,35 +420,77 @@ async def change_stage(lid: str, data: SafeStageChange, user=Depends(operational
     if stage == "Invoice Pending": updates["invoice_status"] = "Ready to Invoice"
     if stage == "Payment Pending": updates["invoice_status"] = "Payment Pending"
     if stage == "Closed": updates["payment_status"] = "Paid"; updates["invoice_status"] = "Paid"
+    stage_action = "load.exception_entered" if stage == "Exception" else ("load.exception_recovered" if old_stage == LoadStage.EXCEPTION else "load.stage_changed")
+    audit = await begin_audit(db.audit_events, user, stage_action, AuditEntityType.LOAD, lid,
+                              changed_fields=list(updates), previous=load)
     transition_query = tenant_filter(user, {"id": lid, "stage": old})
     if old_stage == LoadStage.EXCEPTION:
         transition_query["exception_origin_stage"] = origin_value
-    result = await safe_db(db.loads.update_one(transition_query, mongo_update), "load stage update")
+    result = await audited_db(audit, db.loads.update_one(transition_query, mongo_update), "load stage update")
     if not result.matched_count:
+        await audit.rejected("concurrent_stage_change")
         raise HTTPException(409, "Load stage changed concurrently")
-    await log_activity_best_effort(user, lid, "Stage Change", old, stage, user.get("name", user["id"]), data.notes)
+    await audit.succeeded(updates)
     return {"ok": True, "stage": stage}
 
-# ============ ACTIVITY LOG ============
-async def log_activity(current_user, load_id, action, old, new, actor, notes=""):
-    entry = tenant_document(current_user, {
-        "id": new_id("A"), "load_id": load_id, "action": action,
-        "old_status": old, "new_status": new,
-        "updated_by": actor, "timestamp": now_iso(), "notes": notes
-    })
-    await safe_db(db.activity.insert_one(entry), "activity create")
-
-async def log_activity_best_effort(current_user, load_id, action, old, new, actor, notes=""):
-    """Temporary degraded-audit policy until a transactional outbox exists."""
-    try:
-        await log_activity(current_user, load_id, action, old, new, actor, notes)
-    except Exception:
-        logging.warning("Activity logging failed after successful primary write")
-
+# ============ LEGACY ACTIVITY COMPATIBILITY ============
 @api.get("/activity")
 async def list_activity(load_id: Optional[str] = None, user=Depends(get_current_user)):
     q = tenant_filter(user, {"load_id": load_id} if load_id else None)
-    return await db.activity.find(q, {"_id": 0}).sort("timestamp", -1).to_list(500)
+    legacy = await db.activity.find(q, {"_id": 0}).sort("timestamp", -1).to_list(500)
+    aq = tenant_filter(user, {"phase": "succeeded"})
+    events = await db.audit_events.find(aq, {"_id": 0}).sort("occurred_at", -1).to_list(500)
+    action_names = {
+        "load.created": "Load Created", "load.stage_changed": "Stage Change",
+        "load.exception_entered": "Stage Change", "load.exception_recovered": "Stage Change",
+        "document.created": "Document Uploaded", "alert.generated": "Driver Alert Generated",
+    }
+    mapped = []
+    for event in events:
+        previous, new = event.get("previous_state_summary", {}), event.get("new_state_summary", {})
+        compatible_load_id = event["entity_id"] if event.get("entity_type") == "load" else (new.get("load_id") or previous.get("load_id"))
+        if event.get("action") not in action_names or not compatible_load_id or (load_id and compatible_load_id != load_id): continue
+        mapped.append({"id": event["id"], "tenant_id": event["tenant_id"], "load_id": compatible_load_id,
+                       "action": action_names.get(event["action"], event["action"]),
+                       "old_status": previous.get("stage", ""), "new_status": new.get("stage", ""),
+                       "updated_by": event.get("actor_email") or event.get("actor_id", ""),
+                       "timestamp": event["occurred_at"], "notes": event.get("message", "")})
+    return sorted(mapped + legacy, key=lambda item: (item.get("timestamp", ""), item.get("id", "")), reverse=True)[:500]
+
+
+# ============ APPEND-ONLY AUDIT LEDGER ============
+@api.get("/audit-events/incomplete")
+async def list_incomplete_audit_events(older_than_seconds: int = Query(300, ge=60, le=86400),
+                                       limit: int = Query(50, ge=1, le=100),
+                                       user=Depends(audit_reader)):
+    return await incomplete_operations(db.audit_events, require_tenant_id(user), older_than_seconds, limit)
+
+
+@api.get("/audit-events")
+async def list_audit_events(request: Request, entity_type: Optional[AuditEntityType] = None,
+                            entity_id: Optional[str] = Query(None, max_length=128),
+                            action: Optional[str] = Query(None, max_length=64),
+                            outcome: Optional[AuditOutcome] = None,
+                            operation_id: Optional[str] = Query(None, max_length=128),
+                            actor_id: Optional[str] = Query(None, max_length=128),
+                            date_from: Optional[datetime] = None, date_to: Optional[datetime] = None,
+                            before: Optional[datetime] = None, limit: int = Query(50, ge=1, le=100),
+                            user=Depends(audit_reader)):
+    allowed = {"entity_type", "entity_id", "action", "outcome", "operation_id", "actor_id",
+               "date_from", "date_to", "before", "limit"}
+    unknown = set(request.query_params) - allowed
+    if unknown: raise HTTPException(422, "Unknown audit filter")
+    q = tenant_filter(user)
+    for key, value in (("entity_type", entity_type.value if entity_type else None), ("entity_id", entity_id),
+                       ("action", action), ("outcome", outcome.value if outcome else None),
+                       ("operation_id", operation_id), ("actor_id", actor_id)):
+        if value is not None: q[key] = value
+    occurred = {}
+    if date_from: occurred["$gte"] = date_from.astimezone(timezone.utc).isoformat()
+    upper = before or date_to
+    if upper: occurred["$lt" if before else "$lte"] = upper.astimezone(timezone.utc).isoformat()
+    if occurred: q["occurred_at"] = occurred
+    return await db.audit_events.find(q, {"_id": 0}).sort([("occurred_at", -1), ("id", -1)]).to_list(limit)
 
 # ============ DOCUMENTS ============
 @api.get("/documents")
@@ -419,8 +503,8 @@ async def list_docs(load_id: Optional[str] = None, user=Depends(get_current_user
 async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
     await require_tenant_reference(db.loads, user, d.load_id, "load")
     doc = tenant_document(user, {"id": new_id("DOC"), **d.model_dump(mode="json"), "uploaded_at": now_iso(), "uploaded_by": user.get("name", user["id"])})
-    await safe_db(db.documents.insert_one(doc), "document create"); clean_doc(doc)
-    await log_activity_best_effort(user, d.load_id, f"Uploaded {d.doc_type.value}", "", "", doc["uploaded_by"], d.filename)
+    audit = await begin_audit(db.audit_events, user, "document.created", AuditEntityType.DOCUMENT, doc["id"], changed_fields=list(d.model_fields_set), previous={"load_id": d.load_id})
+    await audited_db(audit, db.documents.insert_one(doc), "document create"); clean_doc(doc); await audit.succeeded(doc)
     return doc
 
 # ============ INVOICES ============
@@ -443,15 +527,20 @@ async def list_invoices(user=Depends(get_current_user)):
 @api.post("/invoices")
 async def create_invoice(inv: InvoiceCreate, user=Depends(finance_write)):
     await require_tenant_reference(db.loads, user, inv.load_id, "load")
-    doc = tenant_document(user, {"id": new_id("INV"), **inv.model_dump(mode="json"), "created_at": now_iso()}); await safe_db(db.invoices.insert_one(doc), "invoice create"); clean_doc(doc)
+    doc = tenant_document(user, {"id": new_id("INV"), **inv.model_dump(mode="json"), "created_at": now_iso()})
+    audit = await begin_audit(db.audit_events, user, "invoice.created", AuditEntityType.INVOICE, doc["id"], changed_fields=list(inv.model_fields_set))
+    await audited_db(audit, db.invoices.insert_one(doc), "invoice create"); clean_doc(doc); await audit.succeeded(doc)
     return doc
 
 @api.put("/invoices/{iid}")
 async def update_invoice(iid: str, data: InvoiceUpdate, user=Depends(finance_write)):
-    if not await safe_db(db.invoices.find_one(tenant_filter(user, {"id": iid}), {"_id": 0}), "invoice lookup"): raise HTTPException(404, "Not found")
+    previous = await safe_db(db.invoices.find_one(tenant_filter(user, {"id": iid}), {"_id": 0}), "invoice lookup")
+    if not previous: raise HTTPException(404, "Not found")
     updates = data.model_dump(mode="json", exclude_unset=True); updates["updated_at"] = now_iso()
-    result = await safe_db(db.invoices.update_one(tenant_filter(user, {"id": iid}), {"$set": updates}), "invoice update")
-    if not result.matched_count: raise HTTPException(404, "Not found")
+    audit = await begin_audit(db.audit_events, user, "invoice.updated", AuditEntityType.INVOICE, iid, changed_fields=list(updates), previous=previous)
+    result = await audited_db(audit, db.invoices.update_one(tenant_filter(user, {"id": iid}), {"$set": updates}), "invoice update")
+    if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
+    await audit.succeeded(updates)
     return {"ok": True}
 
 # ============ PLACEHOLDER INTEGRATION FUNCTIONS ============
@@ -558,6 +647,9 @@ async def generate_alert(a: DriverAlertRequest, user=Depends(operational_write))
             driver = await safe_db(db.drivers.find_one(tenant_filter(user, {"id": load["driver_id"]}), {"_id": 0}), "alert driver lookup")
         if load.get("truck_id"):
             truck = await safe_db(db.trucks.find_one(tenant_filter(user, {"id": load["truck_id"]}), {"_id": 0}), "alert truck lookup")
+    alert_id = new_id("ALT")
+    audit = await begin_audit(db.audit_events, user, "alert.generated", AuditEntityType.ALERT, alert_id,
+                              changed_fields=["load_id", "alert_type"], previous={"load_id": a.load_id})
     msg = f"""DRIVER ALERT
 Load ID: {a.load_id}
 Driver: {driver['name'] if driver else 'Unassigned'}
@@ -569,7 +661,7 @@ Issue: {a.message}
 ETA: {load.get('eta','TBD') if load else 'TBD'}
 Next update required by: {(datetime.now(timezone.utc)+timedelta(hours=2)).strftime('%H:%M UTC')}
 Dispatcher: {user.get('name', user['id'])}"""
-    await log_activity(user, a.load_id, "Driver Alert Generated", "", a.alert_type.value, user.get("name", user["id"]), a.message)
+    await audit.succeeded({"load_id": a.load_id, "alert_type": a.alert_type.value})
     return {"message": msg}
 
 # ============ AI ASSISTANT (Claude Sonnet) ============
@@ -722,8 +814,11 @@ async def seed(force: bool = False, user=Depends(owner_only)):
         c = await db.loads.count_documents(scope)
         if c > 0:
             return {"ok": True, "already_seeded": True, "count": c}
+    audit = await begin_audit(db.audit_events, user, "seed.executed", AuditEntityType.SEED,
+                              require_tenant_id(user), changed_fields=["force"],
+                              source=AuditSource.SEED)
     await db.loads.delete_many(scope); await db.trucks.delete_many(scope)
-    await db.drivers.delete_many(scope); await db.activity.delete_many(scope)
+    await db.drivers.delete_many(scope)
     await db.invoices.delete_many(scope); await db.documents.delete_many(scope)
 
     # Users are NOT pre-seeded. Every user must self-register via /api/auth/signup.
@@ -854,13 +949,7 @@ async def seed(force: bool = False, user=Depends(owner_only)):
             ).model_dump()))
     if inv_docs: await db.invoices.insert_many(inv_docs)
 
-    # Activity
-    for l in load_docs:
-        actor = user.get("name", user["id"])
-        await log_activity(user, l["id"], "Load Created", "", "Booked", actor, "Seeded")
-        if l["stage"] != "Booked":
-            await log_activity(user, l["id"], "Stage Change", "Booked", l["stage"], actor, "")
-
+    await audit.succeeded({"force": force, "count": len(load_docs)})
     return {"ok": True, "loads": len(load_docs), "trucks": len(truck_docs), "drivers": len(driver_docs), "invoices": len(inv_docs)}
 
 # ============ COST ASSUMPTIONS ============
@@ -886,7 +975,11 @@ async def get_assumptions(user=Depends(get_current_user)):
 @api.put("/assumptions")
 async def update_assumptions(data: AssumptionUpdate, user=Depends(finance_write)):
     updates = data.model_dump(mode="json", exclude_unset=True)
-    await safe_db(db.assumptions.update_one(tenant_filter(user, {"id": "default"}), {"$set": updates, "$setOnInsert": tenant_document(user, {"id": "default"})}, upsert=True), "assumption update")
+    previous = await safe_db(db.assumptions.find_one(tenant_filter(user, {"id": "default"}), {"_id": 0}), "assumption lookup")
+    audit = await begin_audit(db.audit_events, user, "assumptions.updated", AuditEntityType.ASSUMPTIONS,
+                              "default", changed_fields=list(updates), previous=previous)
+    await audited_db(audit, db.assumptions.update_one(tenant_filter(user, {"id": "default"}), {"$set": updates, "$setOnInsert": tenant_document(user, {"id": "default"})}, upsert=True), "assumption update")
+    await audit.succeeded(updates)
     return {"ok": True}
 
 # ============ LOAD DECISION ENGINE ============

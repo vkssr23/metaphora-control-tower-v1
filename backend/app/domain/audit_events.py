@@ -1,0 +1,114 @@
+"""Construction, sanitization, integrity, and reconciliation for audit events."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
+from urllib.parse import urlsplit, urlunsplit
+
+from app.schemas.audit import AuditEntityType, AuditEvent, AuditOutcome, AuditPhase, AuditSource
+from app.tenant import require_tenant_id
+
+ALLOWED_ACTIONS = {
+    "truck.created", "truck.updated", "truck.deleted",
+    "driver.created", "driver.updated", "driver.deleted",
+    "load.created", "load.updated", "load.deleted", "load.stage_changed",
+    "load.exception_entered", "load.exception_recovered", "document.created",
+    "invoice.created", "invoice.updated", "assumptions.updated",
+    "alert.generated", "seed.executed", "tenant.signup_created",
+}
+SAFE_FIELDS = {
+    "id", "truck_number", "status", "assigned_driver_id", "assigned_truck_id",
+    "load_id", "stage", "exception_origin_stage", "driver_id", "truck_id",
+    "bol_status", "pod_status", "invoice_status", "payment_status", "risk",
+    "doc_type", "filename", "customer", "amount", "due_date", "paid_date",
+    "dispute", "alert_type", "fuel_price", "mpg", "driver_pay_solo_cpm",
+    "driver_pay_team_cpm", "insurance_per_week", "rental_per_week",
+    "factoring_fee_pct", "default_toll", "target_margin_pct", "min_rpm",
+    "min_net_profit", "count", "force",
+}
+SENSITIVE = re.compile(r"password|secret|token|credential|authorization|api.?key|database|mongo|jwt|header|body|content", re.I)
+MAX_FIELDS = 32
+MAX_STRING = 256
+
+
+def _safe_value(key: str, value: Any) -> Any:
+    if isinstance(value, str):
+        value = value[:MAX_STRING]
+        if key == "url":
+            parts = urlsplit(value)
+            value = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:MAX_STRING]
+
+
+def sanitize_summary(values: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Allowlist bounded operational metadata; never retain arbitrary payloads."""
+    if not values:
+        return {}
+    result: dict[str, Any] = {}
+    for key in sorted(values):
+        if len(result) >= MAX_FIELDS:
+            break
+        if key in SAFE_FIELDS and not SENSITIVE.search(key):
+            result[key] = _safe_value(key, values[key])
+    return result
+
+
+def canonical_event_json(event: Mapping[str, Any]) -> str:
+    content = {key: value for key, value in event.items() if key not in {"_id", "integrity_hash"}}
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+
+
+def integrity_hash(event: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_event_json(event).encode("utf-8")).hexdigest()
+
+
+def verify_integrity(event: Mapping[str, Any]) -> bool:
+    claimed = event.get("integrity_hash")
+    return isinstance(claimed, str) and claimed == integrity_hash(event)
+
+
+def new_operation_id() -> str:
+    return f"op_{uuid.uuid4().hex}"
+
+
+def build_event(*, user: Mapping[str, Any], operation_id: str, phase: AuditPhase,
+                action: str, entity_type: AuditEntityType, entity_id: str,
+                source: AuditSource = AuditSource.API, correlation_id: str | None = None,
+                changed_fields: list[str] | None = None,
+                previous: Mapping[str, Any] | None = None, new: Mapping[str, Any] | None = None,
+                reason_code: str = "", message: str = "") -> dict[str, Any]:
+    if action not in ALLOWED_ACTIONS:
+        raise ValueError("Unsupported audit action")
+    outcomes = {AuditPhase.STARTED: AuditOutcome.PENDING, AuditPhase.SUCCEEDED: AuditOutcome.SUCCESS,
+                AuditPhase.REJECTED: AuditOutcome.REJECTED, AuditPhase.FAILED: AuditOutcome.FAILURE}
+    event = {
+        "id": f"aud_{uuid.uuid4().hex}", "operation_id": operation_id,
+        "tenant_id": require_tenant_id(user), "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "schema_version": 1, "phase": phase.value, "outcome": outcomes[phase].value,
+        "action": action, "entity_type": entity_type.value, "entity_id": str(entity_id)[:128],
+        "actor_id": str(user.get("id", ""))[:128],
+        "actor_email": str(user.get("email", "")).strip().lower()[:MAX_STRING],
+        "actor_role": str(user.get("role", ""))[:64], "source": source.value,
+        "correlation_id": (correlation_id or operation_id)[:128],
+        "changed_fields": sorted({k for k in (changed_fields or []) if k in SAFE_FIELDS})[:MAX_FIELDS],
+        "previous_state_summary": sanitize_summary(previous), "new_state_summary": sanitize_summary(new),
+        "reason_code": str(reason_code)[:64], "message": str(message)[:MAX_STRING],
+    }
+    event["integrity_hash"] = integrity_hash(event)
+    return AuditEvent.model_validate(event).model_dump(mode="json")
+
+
+async def incomplete_operations(collection: Any, tenant_id: str, older_than_seconds: int = 300,
+                                limit: int = 100) -> list[dict[str, Any]]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(60, older_than_seconds))).isoformat()
+    events = await collection.find({"tenant_id": tenant_id}, {"_id": 0}).sort("occurred_at", -1).to_list(1000)
+    terminal = {e["operation_id"] for e in events if e.get("phase") in {"succeeded", "rejected", "failed"}}
+    return [e for e in events if e.get("phase") == "started" and e.get("occurred_at", "") < cutoff
+            and e.get("operation_id") not in terminal][:max(1, min(limit, 100))]

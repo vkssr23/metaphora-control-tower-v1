@@ -32,7 +32,7 @@ class DB:
     def __init__(self, stage=None, origin=None):
         doc = {"id":"L1", "stage":stage.value, "tenant_id":VALID_TENANT} if stage is not None else None
         if doc is not None and origin is not None: doc["exception_origin_stage"] = origin.value
-        self.loads=Collection([] if doc is None else [doc]); self.activity=Collection()
+        self.loads=Collection([] if doc is None else [doc]); self.activity=Collection(); self.audit_events=Collection()
 
 def endpoint(stage, origin=None):
     fake=DB(stage, origin); server.db=fake
@@ -66,10 +66,11 @@ def test_endpoint_enforces_every_stage_pair(current, requested):
     allowed=transition_allowed(current, requested)
     assert response.status_code == (200 if allowed else 409)
     if current == requested:
-        assert fake.activity.docs == []
+        assert fake.audit_events.docs == []
     elif allowed:
         assert fake.loads.docs[0]["stage"] == requested.value
-        assert fake.activity.docs[0]["updated_by"] == "Authenticated Actor"
+        assert [e["phase"] for e in fake.audit_events.docs] == ["started", "succeeded"]
+        assert fake.audit_events.docs[0]["actor_id"] == "U1"
 
 def test_endpoint_unknown_stage_actor_spoof_and_missing_load():
     client, _ = endpoint(LoadStage.BOOKED)
@@ -83,7 +84,7 @@ def test_exception_entry_and_origin_bound_recovery():
     assert client.post("/api/loads/L1/stage", json={"stage":"Exception", "notes":"issue"}).status_code == 200
     assert fake.loads.docs[0]["exception_origin_stage"] == "In Transit"
     assert fake.loads.last_query == {"id":"L1","stage":"In Transit","tenant_id":VALID_TENANT}
-    assert fake.activity.docs[-1]["updated_by"] == "Authenticated Actor"
+    assert fake.audit_events.docs[-1]["phase"] == "succeeded"
 
     client, fake = endpoint(LoadStage.EXCEPTION, LoadStage.IN_TRANSIT)
     assert client.post("/api/loads/L1/stage", json={"stage":"Delivered"}).status_code == 409
@@ -91,7 +92,7 @@ def test_exception_entry_and_origin_bound_recovery():
     assert fake.loads.last_query == {"id":"L1","stage":"Exception","exception_origin_stage":"In Transit","tenant_id":VALID_TENANT}
     assert fake.loads.docs[0]["stage"] == "In Transit"
     assert "exception_origin_stage" not in fake.loads.docs[0]
-    assert fake.activity.docs[-1]["old_status"] == "Exception"
+    assert fake.audit_events.docs[-1]["previous_state_summary"]["stage"] == "Exception"
 
 def test_exception_without_origin_requires_remediation_and_origin_is_protected():
     client, _ = endpoint(LoadStage.EXCEPTION)
@@ -103,18 +104,26 @@ def test_two_stale_transitions_allow_only_first_writer_and_no_lost_race_activity
     fake.loads.read_override={"id":"L1","stage":"Booked"}
     assert client.post("/api/loads/L1/stage", json={"stage":"Assigned"}).status_code==200
     assert client.post("/api/loads/L1/stage", json={"stage":"Assigned"}).status_code==409
-    assert len(fake.activity.docs)==1
+    assert [e["phase"] for e in fake.audit_events.docs]==["started","succeeded","started","rejected"]
 
 def test_exception_entry_recovery_and_origin_change_races_return_409_without_activity():
     client, fake=endpoint(LoadStage.IN_TRANSIT); fake.loads.matched_count_override=0
     assert client.post("/api/loads/L1/stage", json={"stage":"Exception"}).status_code==409
-    assert fake.activity.docs==[]
+    assert fake.audit_events.docs[-1]["phase"]=="rejected"
     client, fake=endpoint(LoadStage.EXCEPTION, LoadStage.IN_TRANSIT); fake.loads.matched_count_override=0
     assert client.post("/api/loads/L1/stage", json={"stage":"In Transit"}).status_code==409
-    assert fake.activity.docs==[]
+    assert fake.audit_events.docs[-1]["phase"]=="rejected"
 
-def test_stage_activity_failure_returns_success_after_primary_write(caplog):
-    client, fake=endpoint(LoadStage.BOOKED); fake.activity.fail_insert=True
+def test_stage_terminal_audit_failure_returns_success_after_primary_write(caplog):
+    client, fake=endpoint(LoadStage.BOOKED)
+    original=fake.audit_events.insert_one
+    calls=0
+    async def fail_terminal(doc):
+        nonlocal calls
+        calls += 1
+        if calls > 1: raise RuntimeError("private audit failure")
+        await original(doc)
+    fake.audit_events.insert_one=fail_terminal
     response=client.post("/api/loads/L1/stage", json={"stage":"Assigned"})
     assert response.status_code==200 and fake.loads.docs[0]["stage"]=="Assigned"
-    assert "Activity logging failed after successful primary write" in caplog.text
+    assert "Audit terminal event could not be recorded after primary operation" in caplog.text

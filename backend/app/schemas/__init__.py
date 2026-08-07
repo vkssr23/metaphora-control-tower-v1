@@ -8,5 +8,6 @@ from .invoices import InvoiceCreate, InvoiceUpdate
 from .loads import LoadCreate, LoadStage, LoadUpdate, StageChange
 from .operations import LoadIdRequest, RouteCalculationRequest, SamsaraVehicleRequest, WeatherCheckRequest
 from .trucks import TruckCreate, TruckUpdate
+from .audit import AuditEntityType, AuditEvent, AuditOutcome, AuditPhase, AuditSource
 
 __all__ = ["AiChatRequest", "AssumptionUpdate", "DocumentCreate", "DriverAlertRequest", "DriverCreate", "DriverUpdate", "InvoiceCreate", "InvoiceUpdate", "LoadAnalysisRequest", "LoadCreate", "LoadIdRequest", "LoadStage", "LoadUpdate", "RouteCalculationRequest", "SamsaraVehicleRequest", "StageChange", "TruckCreate", "TruckUpdate", "WeatherCheckRequest"]

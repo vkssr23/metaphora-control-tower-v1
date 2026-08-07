@@ -39,8 +39,10 @@ def matches(doc, query):
 
 class Cursor:
     def __init__(self, docs): self.docs = docs
-    def sort(self, key, direction):
-        self.docs.sort(key=lambda d: d.get(key, ""), reverse=direction < 0); return self
+    def sort(self, key, direction=None):
+        fields = key if isinstance(key, list) else [(key, direction)]
+        for field, order in reversed(fields): self.docs.sort(key=lambda d: d.get(field, ""), reverse=order < 0)
+        return self
     async def to_list(self, length): return [dict(d) for d in self.docs[:length]]
 
 
@@ -75,7 +77,7 @@ class Collection:
 
 class FakeDB:
     def __init__(self):
-        for name in ("users","tenants","trucks","drivers","loads","documents","invoices","activity","assumptions"):
+        for name in ("users","tenants","trucks","drivers","loads","documents","invoices","activity","audit_events","assumptions"):
             setattr(self, name, Collection())
 
 
