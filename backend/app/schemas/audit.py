@@ -42,6 +42,8 @@ class AuditEntityType(str, Enum):
     PARTY_VERIFICATION_CASE = "party_verification_case"
     EXECUTION_ELIGIBILITY_CASE = "execution_eligibility_case"
     PICKUP_RELEASE_CASE = "pickup_release_case"
+    EXECUTION_SESSION = "execution_session"
+    EXECUTION_EXCEPTION = "execution_exception"
 
 
 class AuditEvent(BaseModel):

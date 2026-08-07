@@ -1,80 +1,30 @@
-/* eslint-disable react-hooks/exhaustive-deps -- intentional mount-only effects */
-import React, { useEffect, useState } from "react";
+/* eslint-disable react-hooks/exhaustive-deps -- intentional mount-only load */
+import React,{useEffect,useState} from "react";
 import Topbar from "../components/Topbar";
 import api from "../lib/api";
-import { Money, Num } from "../components/Badges";
-import { useNavigate } from "react-router-dom";
+import {useNavigate} from "react-router-dom";
 
-export default function InTransit() {
-  const [loads, setLoads] = useState([]);
-  const [now, setNow] = useState(Date.now());
-  const [samsara, setSamsara] = useState({});
-  const nav = useNavigate();
-
-  useEffect(()=>{
-    api.get("/loads").then(async r=>{
-      const inTransit = r.data.filter(l => ["Loaded","In Transit","Arrived Delivery"].includes(l.stage));
-      setLoads(inTransit);
-      const map = {};
-      for (const l of inTransit) {
-        if (l.truck_id) {
-          try {
-            const { data } = await api.post("/samsara/vehicle", { truck_id: l.truck_id });
-            map[l.id] = data;
-          } catch {
-            map[l.id] = null;
-          }
-        }
-      }
-      setSamsara(map);
-    });
-    const t = setInterval(()=>setNow(Date.now()), 1000);
-    return ()=>clearInterval(t);
-  },[]);
-
-  const format = (ms) => {
-    const s = Math.floor(ms/1000); const h = Math.floor(s/3600); const m = Math.floor((s%3600)/60); const sec = s%60;
-    return `${h}h ${m}m ${sec}s`;
-  };
-
-  return (
-    <div>
-      <Topbar title="In-Transit Control" subtitle={`${loads.length} active trips · live timers`} />
-      <div className="p-6 space-y-3">
-        {loads.map(l => {
-          const started = new Date(l.updated_at).getTime();
-          const s = samsara[l.id];
-          return (
-            <div key={l.id} className="terminal-card p-4 grid grid-cols-1 md:grid-cols-6 gap-3 items-center hover:border-sky-500/50 cursor-pointer" onClick={()=>nav(`/loads/${l.id}`)} data-testid={`transit-${l.id}`}>
-              <div>
-                <div className="font-mono text-xs text-sky-400 font-semibold">{l.id}</div>
-                <div className="text-xs">{l.customer}</div>
-              </div>
-              <div className="text-xs font-mono">
-                <div className="text-zinc-500">Lane</div>
-                <div>{l.pickup_city} → {l.delivery_city}</div>
-              </div>
-              <div className="text-xs font-mono">
-                <div className="text-zinc-500">Current Location</div>
-                <div>{s?.location || l.pickup_city}</div>
-              </div>
-              <div className="text-xs font-mono">
-                <div className="text-zinc-500">Speed / Engine</div>
-                <div>{s ? `${s.speed_mph || 0} mph · ${s.engine || "?"}` : "Unavailable"}</div>
-              </div>
-              <div className="text-xs font-mono">
-                <div className="text-zinc-500">Drive Time</div>
-                <div className="text-emerald-400">{format(now-started)}</div>
-              </div>
-              <div className="text-xs font-mono">
-                <div className="text-zinc-500">Idle · HOS</div>
-                <div>{s ? `${s.idle_minutes || 0}min · ${s.hos_remaining_hours || "?"}h` : "Unavailable"}</div>
-              </div>
-            </div>
-          );
-        })}
-        {loads.length===0 && <div className="text-zinc-500 text-sm">No active in-transit loads.</div>}
-      </div>
+const tone={healthy:"text-emerald-400",watch:"text-amber-400",at_risk:"text-orange-400",critical:"text-red-400"};
+export default function InTransit(){
+ const [sessions,setSessions]=useState([]);const [errors,setErrors]=useState("");const nav=useNavigate();
+ useEffect(()=>{api.get("/execution-sessions").then(r=>setSessions(r.data)).catch(e=>setErrors(e?.response?.data?.detail||"Execution sessions are unavailable"));},[]);
+ return <div>
+  <Topbar title="In-Transit Execution Control" subtitle={`${sessions.filter(s=>!['completed','cancelled'].includes(s.status)).length} controlled execution sessions`}/>
+  <div className="p-6 space-y-4">
+   <div className="terminal-card p-4 border-amber-500/30 text-xs text-amber-300">Live GPS, telematics, traffic, weather and ELD data are not connected in this phase. Progress and ETA information shown here may be manually reported or internally calculated.</div>
+   {errors&&<div className="terminal-card p-4 text-red-400">{typeof errors==="string"?errors:JSON.stringify(errors)}</div>}
+   {sessions.map(s=>{const p=s.planned_snapshot||{},a=s.actual_snapshot||{},eta=s.eta_snapshot||{},det=s.detention_snapshot||{},exceptions=s.open_exception_count||0;return <button key={s.id} onClick={()=>nav(`/loads/${s.load_id}`)} className="terminal-card p-4 w-full text-left hover:border-sky-500/50" data-testid={`execution-${s.id}`}>
+    <div className="flex flex-wrap justify-between gap-3 mb-4"><div><div className="font-mono text-xs text-sky-400">{s.id}</div><div className="font-semibold">Load {s.load_id}</div></div><div className="text-right"><div className="uppercase text-xs">{s.status} · {s.execution_state}</div><div className={`text-xs ${tone[s.execution_health]||"text-zinc-400"}`}>{s.execution_health||"unknown"} · {exceptions} open exception{exceptions===1?"":"s"}</div></div></div>
+    <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs font-mono">
+     <div><span className="text-zinc-500 block">Driver / Truck</span>{p.driver_id||"—"} / {p.truck_id||"—"}</div>
+     <div><span className="text-zinc-500 block">Trailer</span>{p.trailer_identifier||"—"}</div>
+     <div><span className="text-zinc-500 block">Manual location</span>{a.current_location_text||"Not reported"}</div>
+     <div><span className="text-zinc-500 block">ETA</span>{eta.current_eta||"Unknown"} ({eta.status||"unknown"})</div>
+     <div><span className="text-zinc-500 block">Stop progress</span>{(s.current_stop_index||0)+1} / {s.total_stops||0}</div>
+     <div><span className="text-zinc-500 block">Detention / POD</span>{det.state||"none"} / {s.status==="delivery_confirmed"?"required to complete":"pending"}</div>
     </div>
-  );
+   </button>})}
+   {!sessions.length&&!errors&&<div className="text-zinc-500 text-sm">No execution sessions have started.</div>}
+  </div>
+ </div>;
 }
