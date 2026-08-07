@@ -19,6 +19,10 @@ ALLOWED_ACTIONS = {
     "load.exception_entered", "load.exception_recovered", "document.created",
     "invoice.created", "invoice.updated", "assumptions.updated",
     "alert.generated", "seed.executed", "tenant.signup_created",
+    "load_passport.created", "load_passport.updated", "load_passport.checkpoint_updated",
+    "load_passport.profitability_refreshed", "load_passport.submitted", "load_passport.approved",
+    "load_passport.blocked", "load_passport.revoked", "load_passport.material_change_invalidated",
+    "pickup_authorization.issued", "pickup_authorization.revoked",
 }
 SAFE_FIELDS = {
     "id", "truck_number", "status", "assigned_driver_id", "assigned_truck_id",
@@ -29,6 +33,7 @@ SAFE_FIELDS = {
     "driver_pay_team_cpm", "insurance_per_week", "rental_per_week",
     "factoring_fee_pct", "default_toll", "target_margin_pct", "min_rpm",
     "min_net_profit", "count", "force",
+    "passport_id", "version", "checkpoint_type", "reason_code", "pickup_authorization_id",
 }
 SENSITIVE = re.compile(r"password|secret|token|credential|authorization|api.?key|database|mongo|jwt|header|body|content", re.I)
 MAX_FIELDS = 32

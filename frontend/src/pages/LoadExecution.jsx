@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import Topbar from "../components/Topbar";
 import api from "../lib/api";
 import { StageBadge, RiskBadge, Money, Num } from "../components/Badges";
+import LoadPassport from "../components/LoadPassport";
 import { toast, Toaster } from "sonner";
 import {
   ChevronLeft, MapPin, Truck as TruckIcon, User, DollarSign, Calendar, AlertTriangle,
@@ -208,6 +209,8 @@ export default function LoadExecution() {
             </div>
           </div>
         </div>
+
+        <LoadPassport loadId={id} />
 
         {/* TIMELINE */}
         <div className="terminal-card p-4">
