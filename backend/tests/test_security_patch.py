@@ -30,6 +30,8 @@ from app.config import force_seed_allowed, parse_cors_origins, validate_jwt_secr
 from app.permissions import ROLE_CAPABILITIES
 from app.security import authenticated_user_dependency, create_token
 
+VALID_TENANT = "ten_" + "a" * 32
+
 
 class FakeCursor:
     def __init__(self, docs):
@@ -87,11 +89,12 @@ class FakeDB:
         self.documents = FakeCollection()
         self.invoices = FakeCollection()
         self.assumptions = FakeCollection()
+        self.tenants = FakeCollection()
 
 
 @pytest.fixture(autouse=True)
 def isolated_db(monkeypatch):
-    fake = FakeDB(loads=[{"id": "L1", "customer": "Test"}])
+    fake = FakeDB(loads=[{"id": "L1", "customer": "Test", "tenant_id": VALID_TENANT}])
     monkeypatch.setattr(server, "db", fake)
     server.app.dependency_overrides.clear()
     yield fake
@@ -100,7 +103,7 @@ def isolated_db(monkeypatch):
 
 def as_role(role):
     async def dependency():
-        return {"id": f"U-{role}", "email": f"{role}@test.invalid", "name": role.title(), "role": role}
+        return {"id": f"U-{role}", "email": f"{role}@test.invalid", "name": role.title(), "role": role, "tenant_id": VALID_TENANT}
     server.app.dependency_overrides[server.get_current_user] = dependency
 
 
@@ -274,7 +277,7 @@ def test_signup_allowlists_response_and_normalizes_email(isolated_db):
         "email": "NEW.User@Example.com", "password": "long-enough-password", "name": "Test",
     })
     assert response.status_code == 200
-    assert set(response.json()["user"]) == {"id", "email", "name", "role", "created_at"}
+    assert set(response.json()["user"]) == {"id", "email", "name", "role", "tenant_id", "created_at"}
     assert response.json()["user"]["email"] == "new.user@example.com"
     assert response.json()["user"]["role"] == "viewer"
 

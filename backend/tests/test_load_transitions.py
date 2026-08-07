@@ -8,6 +8,7 @@ from app.schemas.loads import LoadStage, StageChange
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 import server
+VALID_TENANT = "ten_" + "a" * 32
 
 class Collection:
     def __init__(self, docs=None): self.docs=list(docs or []); self.last_query=None; self.matched_count_override=None; self.read_override=None; self.fail_insert=False
@@ -29,13 +30,13 @@ class Collection:
 
 class DB:
     def __init__(self, stage=None, origin=None):
-        doc = {"id":"L1", "stage":stage.value} if stage is not None else None
+        doc = {"id":"L1", "stage":stage.value, "tenant_id":VALID_TENANT} if stage is not None else None
         if doc is not None and origin is not None: doc["exception_origin_stage"] = origin.value
         self.loads=Collection([] if doc is None else [doc]); self.activity=Collection()
 
 def endpoint(stage, origin=None):
     fake=DB(stage, origin); server.db=fake
-    async def user(): return {"id":"U1", "name":"Authenticated Actor", "role":"operations"}
+    async def user(): return {"id":"U1", "name":"Authenticated Actor", "role":"operations", "tenant_id":VALID_TENANT}
     server.app.dependency_overrides[server.get_current_user]=user
     return TestClient(server.app), fake
 
@@ -81,13 +82,13 @@ def test_exception_entry_and_origin_bound_recovery():
     client, fake = endpoint(LoadStage.IN_TRANSIT)
     assert client.post("/api/loads/L1/stage", json={"stage":"Exception", "notes":"issue"}).status_code == 200
     assert fake.loads.docs[0]["exception_origin_stage"] == "In Transit"
-    assert fake.loads.last_query == {"id":"L1","stage":"In Transit"}
+    assert fake.loads.last_query == {"id":"L1","stage":"In Transit","tenant_id":VALID_TENANT}
     assert fake.activity.docs[-1]["updated_by"] == "Authenticated Actor"
 
     client, fake = endpoint(LoadStage.EXCEPTION, LoadStage.IN_TRANSIT)
     assert client.post("/api/loads/L1/stage", json={"stage":"Delivered"}).status_code == 409
     assert client.post("/api/loads/L1/stage", json={"stage":"In Transit", "notes":"resolved"}).status_code == 200
-    assert fake.loads.last_query == {"id":"L1","stage":"Exception","exception_origin_stage":"In Transit"}
+    assert fake.loads.last_query == {"id":"L1","stage":"Exception","exception_origin_stage":"In Transit","tenant_id":VALID_TENANT}
     assert fake.loads.docs[0]["stage"] == "In Transit"
     assert "exception_origin_stage" not in fake.loads.docs[0]
     assert fake.activity.docs[-1]["old_status"] == "Exception"

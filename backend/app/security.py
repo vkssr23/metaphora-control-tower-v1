@@ -8,7 +8,7 @@ from fastapi import Header, HTTPException
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
     """Serialize only fields that are part of the public user contract."""
-    allowed = ("id", "email", "name", "role", "active", "is_active", "created_at")
+    allowed = ("id", "email", "name", "role", "tenant_id", "active", "is_active", "created_at")
     return {key: user[key] for key in allowed if key in user}
 
 
@@ -43,6 +43,8 @@ def authenticated_user_dependency(db: Any, secret: str):
         if not user or not user_is_active(user):
             raise HTTPException(status_code=401, detail="User is unavailable")
         normalized = public_user(user)
+        # public_user receives only the freshly loaded database record. Tenant
+        # membership in this response is informational, never JWT authority.
         normalized["email"] = str(normalized.get("email", "")).strip().lower()
         normalized["role"] = str(normalized.get("role", "viewer")).strip().lower()
         return normalized

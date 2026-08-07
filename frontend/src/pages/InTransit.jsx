@@ -18,8 +18,12 @@ export default function InTransit() {
       const map = {};
       for (const l of inTransit) {
         if (l.truck_id) {
-          const { data } = await api.post("/samsara/vehicle", { vehicle_id: `VEH${l.truck_id.slice(0,3)}` });
-          map[l.id] = data;
+          try {
+            const { data } = await api.post("/samsara/vehicle", { truck_id: l.truck_id });
+            map[l.id] = data;
+          } catch {
+            map[l.id] = null;
+          }
         }
       }
       setSamsara(map);
@@ -56,7 +60,7 @@ export default function InTransit() {
               </div>
               <div className="text-xs font-mono">
                 <div className="text-zinc-500">Speed / Engine</div>
-                <div>{s?.speed_mph||0} mph · {s?.engine||"?"}</div>
+                <div>{s ? `${s.speed_mph || 0} mph · ${s.engine || "?"}` : "Unavailable"}</div>
               </div>
               <div className="text-xs font-mono">
                 <div className="text-zinc-500">Drive Time</div>
@@ -64,7 +68,7 @@ export default function InTransit() {
               </div>
               <div className="text-xs font-mono">
                 <div className="text-zinc-500">Idle · HOS</div>
-                <div>{s?.idle_minutes||0}min · {s?.hos_remaining_hours||"?"}h</div>
+                <div>{s ? `${s.idle_minutes || 0}min · ${s.hos_remaining_hours || "?"}h` : "Unavailable"}</div>
               </div>
             </div>
           );
