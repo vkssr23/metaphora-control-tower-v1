@@ -21,7 +21,10 @@ from app.domain.load_passports import MATERIAL_LOAD_FIELDS, bounded_load_snapsho
 from app.passport_routes import register_passport_routes
 from app.rate_confirmation_routes import register_rate_confirmation_routes
 from app.party_verification_routes import register_party_verification_routes
+from app.execution_eligibility_routes import register_execution_eligibility_routes
 from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation, is_insurance_document
+from app.execution_invalidation import preinvalidate_for_load, preinvalidate_for_snapshot
+from app.domain.execution_eligibility import DRIVER_MATERIAL_FIELDS, TRUCK_MATERIAL_FIELDS
 from app.schemas import (
     AiChatRequest, AssumptionUpdate, DocumentCreate, DriverAlertRequest, DriverCreate,
     DriverUpdate, InvoiceCreate, InvoiceUpdate, LoadAnalysisRequest, LoadCreate,
@@ -300,6 +303,8 @@ async def update_truck(tid: str, data: TruckUpdate, user=Depends(safety_write)):
     if "assigned_driver_id" in updates: await require_tenant_reference(db.drivers, user, updates["assigned_driver_id"], "assigned driver")
     updates["updated_at"] = now_iso()
     audit = await begin_audit(db.audit_events, user, "truck.updated", AuditEntityType.TRUCK, tid, changed_fields=list(updates), previous=previous)
+    if set(updates) & TRUCK_MATERIAL_FIELDS:
+        await preinvalidate_for_snapshot(db, user, "truck_snapshot", tid, ["truck"] + (["equipment"] if "equipment_type" in updates else []))
     result = await audited_db(audit, db.trucks.update_one(tenant_filter(user, {"id": tid}), {"$set": updates}), "truck update")
     if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
     await audit.succeeded(updates)
@@ -335,6 +340,8 @@ async def update_driver(did: str, data: DriverUpdate, user=Depends(safety_write)
     updates = data.model_dump(mode="json", exclude_unset=True); updates["updated_at"] = now_iso()
     if "assigned_truck_id" in updates: await require_tenant_reference(db.trucks, user, updates["assigned_truck_id"], "assigned truck")
     audit = await begin_audit(db.audit_events, user, "driver.updated", AuditEntityType.DRIVER, did, changed_fields=list(updates), previous=previous)
+    if set(updates) & DRIVER_MATERIAL_FIELDS:
+        await preinvalidate_for_snapshot(db, user, "driver_snapshot", did, ["driver"])
     result = await audited_db(audit, db.drivers.update_one(tenant_filter(user, {"id": did}), {"$set": updates}), "driver update")
     if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
     await audit.succeeded(updates)
@@ -405,6 +412,18 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
                 invalidation_plan={"required":True,"query":party_passport_plan["query"],"update":party_passport_plan["update"],"new_version":party_passport_plan["update"]["version"]}
                 if not invalidation_audit: invalidation_audit=await begin_audit(db.audit_events,user,"load_passport.material_change_invalidated",AuditEntityType.LOAD_PASSPORT,passport["id"],changed_fields=material_fields+["status","version"],previous=passport)
     audit = await begin_audit(db.audit_events, user, "load.updated", AuditEntityType.LOAD, lid, changed_fields=list(updates), previous=load)
+    execution_changes=[]
+    if set(updates)&{"driver_id"}: execution_changes.append("driver_assignment")
+    if set(updates)&{"truck_id"}: execution_changes.append("truck_assignment")
+    if set(updates)&{"equipment_type"}: execution_changes.append("equipment")
+    if set(updates)&{"commodity"}: execution_changes.append("commodity")
+    if set(updates)&{"weight"}: execution_changes.append("weight")
+    if set(updates)&{"pickup_address","pickup_city","pickup_state","pickup_zip","pickup_appt","delivery_address","delivery_city","delivery_state","delivery_zip","delivery_appt"}: execution_changes.append("appointment")
+    if set(updates)&{"miles","deadhead_miles","est_drive_hours"}: execution_changes.append("mileage")
+    execution_cases=await preinvalidate_for_load(db,user,lid,execution_changes) if execution_changes else []
+    if execution_cases and invalidation_plan:
+        passport=await passport_collection.find_one(tenant_filter(user,{"id":passport["id"]}),{"_id":0})
+        invalidation_plan=build_preinvalidation(passport,material_categories(material_fields),user["id"],utc_now())
     if verification_audit:
         vr = await audited_db(verification_audit, case_collection.update_one(tenant_filter(user,{"id":verification_case["id"],"status":"cleared","version":verification_case["version"]}),{"$set":verification_update}), "verification pre-invalidation")
         if not vr.matched_count:
@@ -568,6 +587,13 @@ async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
             if invalidation_plan["required"]:
                 invalidation_audit = await begin_audit(db.audit_events, user, "load_passport.material_change_invalidated", AuditEntityType.LOAD_PASSPORT, passport["id"], changed_fields=["rate_confirmation", "status", "version"], previous=passport)
     audit = await begin_audit(db.audit_events, user, "document.created", AuditEntityType.DOCUMENT, doc["id"], changed_fields=list(d.model_fields_set), previous={"load_id": d.load_id})
+    execution_cases=await preinvalidate_for_load(db,user,d.load_id,["rate_confirmation" if relevant_change=="rate_confirmation" else "party_verification"]) if relevant_change else []
+    if execution_cases and passport:
+        passport=await passport_collection.find_one(tenant_filter(user,{"id":passport["id"]}),{"_id":0})
+        if verification_plan:
+            pp=build_passport_preinvalidation(passport,verification_plan["effects"],user["id"],utc_now()); invalidation_plan={"required":True,"query":pp["query"],"update":pp["update"],"new_version":pp["update"]["version"]}
+        else:
+            invalidation_plan=build_preinvalidation(passport,["rate_confirmation" if relevant_change=="rate_confirmation" else "insurance"],user["id"],utc_now())
     if verification_audit:
         vr=await audited_db(verification_audit,case_collection.update_one(tenant_filter(user,verification_plan["query"]),{"$set":verification_plan["update"]}),"verification pre-invalidation")
         if not vr.matched_count:
@@ -1240,6 +1266,7 @@ class _DynamicDBProxy:
 register_passport_routes(api, _DynamicDBProxy(), get_current_user)
 register_rate_confirmation_routes(api, _DynamicDBProxy(), get_current_user)
 register_party_verification_routes(api, _DynamicDBProxy(), get_current_user)
+register_execution_eligibility_routes(api, _DynamicDBProxy(), get_current_user)
 
 @public_api.get("/")
 async def root():

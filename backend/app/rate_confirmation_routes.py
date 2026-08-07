@@ -8,6 +8,7 @@ from app.domain.load_passports import build_preinvalidation, bounded_load_snapsh
 from app.domain.rate_confirmations import compare_rate_confirmation, validate_corrected_value, LOAD_FIELD_MAP, FINANCIAL
 from app.schemas.rate_confirmations import ExtractionCreate, ExtractionUpdate, ConfidenceUpdate, CompareAction, SubmitAction, AcceptAction, RejectAction, SupersedeAction, ResolutionUpdate, ResolutionStatus
 from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation
+from app.execution_invalidation import preinvalidate_for_load
 
 ADMIN={"owner","admin"}; OPS=ADMIN|{"operations","dispatcher"}; FINANCE=ADMIN|{"finance"}
 def _role(user,roles):
@@ -150,6 +151,8 @@ def register_rate_confirmation_routes(api,db,get_current_user):
             value=r.get("corrected_value") if r["decision"]=="corrected_value" else d["document_value"]
             updates[lf]=value; selected.append(lf)
         material=sorted(set(selected)); audit=await begin_audit(db.audit_events,user,"rate_confirmation.accepted",AuditEntityType.RATE_CONFIRMATION_EXTRACTION,eid,changed_fields=["status","version"]+material,previous=e); passport=await db.load_passports.find_one(tenant_filter(user,{"load_id":e["load_id"]}),{"_id":0}); invalidation=None
+        execution_cases=await preinvalidate_for_load(db,user,e["load_id"],["rate_confirmation"])
+        if execution_cases: passport=await db.load_passports.find_one(tenant_filter(user,{"load_id":e["load_id"]}),{"_id":0})
         case_collection=getattr(db,"party_verification_cases",None); verification_case=None; verification_plan=None
         if case_collection is not None:
             verification_case=await case_collection.find_one(tenant_filter(user,{"load_id":e["load_id"],"status":"cleared"}),{"_id":0})
@@ -190,4 +193,5 @@ def register_rate_confirmation_routes(api,db,get_current_user):
         _role(user,ADMIN); e=await _one(db,user,eid)
         if e["status"]!="accepted": raise HTTPException(409,"Only accepted extraction may be superseded")
         audit=await begin_audit(db.audit_events,user,"rate_confirmation.superseded",AuditEntityType.RATE_CONFIRMATION_EXTRACTION,eid,changed_fields=["status","version"],previous=e)
+        await preinvalidate_for_load(db,user,e["load_id"],["rate_confirmation"])
         return await _replace(db,audit,user,e,{"status":"superseded","superseded_at":utc_now(),"superseded_by":user["id"],"supersession_reason":data.reason},"supersede")

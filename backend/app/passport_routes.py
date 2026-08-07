@@ -9,6 +9,7 @@ from app.schemas.audit import AuditEntityType
 from app.schemas.passports import (CheckpointStatus, CheckpointType, CheckpointUpdate, EmptyAction,
     PassportCreate, PassportUpdate, ReasonAction)
 from app.tenant import tenant_document, tenant_filter
+from app.execution_invalidation import preinvalidate_for_load
 
 ADMIN_ROLES={"owner","admin"}; OPERATIONAL_ROLES={"owner","admin","operations","dispatcher"}
 ALLOWED={"draft":{"review_pending"},"review_pending":{"approved","blocked"},"blocked":{"review_pending"},"approved":{"pickup_authorized","revoked"},"pickup_authorized":{"revoked"},"revoked":{"review_pending"}}
@@ -71,10 +72,13 @@ def register_passport_routes(api,db,get_current_user):
     @api.put("/load-passports/{passport_id}")
     async def update_passport(passport_id:str,data:PassportUpdate,user=Depends(get_current_user)):
         _role(user,OPERATIONAL_ROLES); p=await _passport(db,user,passport_id); updates=data.model_dump(exclude_unset=True)
+        audit=await begin_audit(db.audit_events,user,"load_passport.updated",AuditEntityType.LOAD_PASSPORT,passport_id,changed_fields=list(updates),previous=p)
         if "trailer_identifier" in updates:
             a=dict(p["assignment_snapshot"]); changed=a.get("trailer_identifier")!=updates["trailer_identifier"]; a["trailer_identifier"]=updates.pop("trailer_identifier"); updates["assignment_snapshot"]=a
-            if changed and p["status"] in {"approved","pickup_authorized"}: updates.update(_invalidated(p,user))
-        audit=await begin_audit(db.audit_events,user,"load_passport.updated",AuditEntityType.LOAD_PASSPORT,passport_id,changed_fields=list(updates),previous=p)
+            if changed:
+                cases=await preinvalidate_for_load(db,user,p["load_id"],["trailer"])
+                if cases: p=await _passport(db,user,passport_id)
+                if p["status"] in {"approved","pickup_authorized"}: updates.update(_invalidated(p,user))
         return await _replace(db,audit,user,p,updates,"passport update")
     @api.put("/load-passports/{passport_id}/checkpoints/{checkpoint_type}")
     async def update_checkpoint(passport_id:str,checkpoint_type:CheckpointType,data:CheckpointUpdate,user=Depends(get_current_user)):
