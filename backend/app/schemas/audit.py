@@ -36,6 +36,8 @@ class AuditEntityType(str, Enum):
     ALERT = "alert"
     TENANT = "tenant"
     SEED = "seed"
+    LOAD_PASSPORT = "load_passport"
+    PICKUP_AUTHORIZATION = "pickup_authorization"
 
 
 class AuditEvent(BaseModel):
