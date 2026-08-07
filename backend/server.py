@@ -12,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 from app.config import Settings, force_seed_allowed
 from app.permissions import require_capability, require_owner
 from app.security import authenticated_user_dependency, create_token, public_user
+from app.tenant import new_tenant_id, tenant_document, tenant_filter, require_tenant_reference
 from app.domain.load_transitions import transition_allowed
 from app.schemas import (
     AiChatRequest, AssumptionUpdate, DocumentCreate, DriverAlertRequest, DriverCreate,
@@ -20,6 +21,7 @@ from app.schemas import (
     SamsaraVehicleRequest, StageChange as SafeStageChange, TruckCreate, TruckUpdate,
     WeatherCheckRequest,
 )
+from app.schemas.tenants import TenantRecord, TenantStatus
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -66,6 +68,7 @@ class LoginIn(BaseModel):
         return str(value).strip().lower()
 
 class SignupIn(BaseModel):
+    model_config = {"extra": "forbid"}
     email: EmailStr
     password: str
     name: str
@@ -113,12 +116,28 @@ async def signup(data: SignupIn):
     existing = await find_user_by_email(str(data.email))
     if existing:
         raise HTTPException(400, "Email exists")
+    timestamp = now_iso()
+    tenant = TenantRecord(id=new_tenant_id(), name=f"{data.name.strip() or 'New'} Workspace", status=TenantStatus.ACTIVE, created_at=timestamp, updated_at=timestamp).model_dump(mode="json")
+    await safe_db(db.tenants.insert_one(tenant), "tenant create")
     user = {
         "id": new_id("U"), "email": str(data.email), "name": data.name, "role": "viewer",
+        "tenant_id": tenant["id"],
         "password": bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode(),
         "created_at": now_iso()
     }
-    await db.users.insert_one(user)
+    try:
+        await safe_db(db.users.insert_one(user), "user create")
+    except HTTPException:
+        try:
+            await db.tenants.delete_one({"id": tenant["id"]})
+        except Exception:
+            logging.error("Signup tenant cleanup failed")
+        raise
+    try:
+        defaults = tenant_document(user, DEFAULT_ASSUMPTIONS)
+        await safe_db(db.assumptions.insert_one(defaults), "tenant defaults create")
+    except HTTPException:
+        logging.error("Signup assumptions initialization failed")
     safe_user = public_user(user)
     return {"token": create_token(safe_user, settings.jwt_secret), "user": safe_user}
 
@@ -237,96 +256,104 @@ class InternalSeedLoad(BaseModel):
 
 # ============ TRUCKS ============
 @api.get("/trucks")
-async def list_trucks():
-    docs = await db.trucks.find({}, {"_id": 0}).to_list(1000)
+async def list_trucks(user=Depends(get_current_user)):
+    docs = await db.trucks.find(tenant_filter(user), {"_id": 0}).to_list(1000)
     return docs
 
 @api.post("/trucks")
 async def create_truck(t: TruckCreate, user=Depends(safety_write)):
-    d = {"id": new_id("T"), **t.model_dump(mode="json"), "profit_per_mile": 0, "created_at": now_iso()}
+    await require_tenant_reference(db.drivers, user, t.assigned_driver_id, "assigned driver")
+    d = tenant_document(user, {"id": new_id("T"), **t.model_dump(mode="json"), "profit_per_mile": 0, "created_at": now_iso()})
     await safe_db(db.trucks.insert_one(d), "truck create"); clean_doc(d)
     return d
 
 @api.put("/trucks/{tid}")
 async def update_truck(tid: str, data: TruckUpdate, user=Depends(safety_write)):
-    if not await safe_db(db.trucks.find_one({"id": tid}, {"_id": 0}), "truck lookup"): raise HTTPException(404, "Not found")
+    if not await safe_db(db.trucks.find_one(tenant_filter(user, {"id": tid}), {"_id": 0}), "truck lookup"): raise HTTPException(404, "Not found")
     updates = data.model_dump(mode="json", exclude_unset=True)
+    if "assigned_driver_id" in updates: await require_tenant_reference(db.drivers, user, updates["assigned_driver_id"], "assigned driver")
     updates["updated_at"] = now_iso()
-    result = await safe_db(db.trucks.update_one({"id": tid}, {"$set": updates}), "truck update")
+    result = await safe_db(db.trucks.update_one(tenant_filter(user, {"id": tid}), {"$set": updates}), "truck update")
     if not result.matched_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 @api.delete("/trucks/{tid}")
 async def delete_truck(tid: str, user=Depends(safety_write)):
-    result = await safe_db(db.trucks.delete_one({"id": tid}), "truck delete")
+    result = await safe_db(db.trucks.delete_one(tenant_filter(user, {"id": tid})), "truck delete")
     if not result.deleted_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 # ============ DRIVERS ============
 @api.get("/drivers")
-async def list_drivers():
-    return await db.drivers.find({}, {"_id": 0}).to_list(1000)
+async def list_drivers(user=Depends(get_current_user)):
+    return await db.drivers.find(tenant_filter(user), {"_id": 0}).to_list(1000)
 
 @api.post("/drivers")
 async def create_driver(d: DriverCreate, user=Depends(safety_write)):
-    doc = {"id": new_id("D"), **d.model_dump(mode="json"), "created_at": now_iso()}; await safe_db(db.drivers.insert_one(doc), "driver create"); clean_doc(doc)
+    await require_tenant_reference(db.trucks, user, d.assigned_truck_id, "assigned truck")
+    doc = tenant_document(user, {"id": new_id("D"), **d.model_dump(mode="json"), "created_at": now_iso()}); await safe_db(db.drivers.insert_one(doc), "driver create"); clean_doc(doc)
     return doc
 
 @api.put("/drivers/{did}")
 async def update_driver(did: str, data: DriverUpdate, user=Depends(safety_write)):
-    if not await safe_db(db.drivers.find_one({"id": did}, {"_id": 0}), "driver lookup"): raise HTTPException(404, "Not found")
+    if not await safe_db(db.drivers.find_one(tenant_filter(user, {"id": did}), {"_id": 0}), "driver lookup"): raise HTTPException(404, "Not found")
     updates = data.model_dump(mode="json", exclude_unset=True); updates["updated_at"] = now_iso()
-    result = await safe_db(db.drivers.update_one({"id": did}, {"$set": updates}), "driver update")
+    if "assigned_truck_id" in updates: await require_tenant_reference(db.trucks, user, updates["assigned_truck_id"], "assigned truck")
+    result = await safe_db(db.drivers.update_one(tenant_filter(user, {"id": did}), {"$set": updates}), "driver update")
     if not result.matched_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 @api.delete("/drivers/{did}")
 async def delete_driver(did: str, user=Depends(safety_write)):
-    result = await safe_db(db.drivers.delete_one({"id": did}), "driver delete")
+    result = await safe_db(db.drivers.delete_one(tenant_filter(user, {"id": did})), "driver delete")
     if not result.deleted_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 # ============ LOADS ============
 @api.get("/loads")
-async def list_loads():
-    return await db.loads.find({}, {"_id": 0}).to_list(2000)
+async def list_loads(user=Depends(get_current_user)):
+    return await db.loads.find(tenant_filter(user), {"_id": 0}).to_list(2000)
 
 @api.get("/loads/{lid}")
-async def get_load(lid: str):
-    l = await db.loads.find_one({"id": lid}, {"_id": 0})
+async def get_load(lid: str, user=Depends(get_current_user)):
+    l = await db.loads.find_one(tenant_filter(user, {"id": lid}), {"_id": 0})
     if not l: raise HTTPException(404, "Not found")
     return l
 
 @api.post("/loads")
 async def create_load(l: LoadCreate, user=Depends(operational_write)):
-    d = {"id": new_id("L"), **l.model_dump(mode="json"), "dispatcher": user.get("name", user["id"]), "stage": "Booked", "bol_status": "Pending", "pod_status": "Pending", "invoice_status": "Not Ready", "payment_status": "Pending", "created_at": now_iso(), "updated_at": now_iso()}
+    await require_tenant_reference(db.drivers, user, l.driver_id, "driver")
+    await require_tenant_reference(db.trucks, user, l.truck_id, "truck")
+    d = tenant_document(user, {"id": new_id("L"), **l.model_dump(mode="json"), "dispatcher": user.get("name", user["id"]), "stage": "Booked", "bol_status": "Pending", "pod_status": "Pending", "invoice_status": "Not Ready", "payment_status": "Pending", "created_at": now_iso(), "updated_at": now_iso()})
     d["rpm"] = round(d["rate"] / d["miles"], 2) if d["miles"] > 0 and d["rate"] > 0 else 0
     await safe_db(db.loads.insert_one(d), "load create"); clean_doc(d)
-    await log_activity_best_effort(d["id"], "Load Created", "", "Booked", user.get("name", user["id"]), "Load created")
+    await log_activity_best_effort(user, d["id"], "Load Created", "", "Booked", user.get("name", user["id"]), "Load created")
     return d
 
 @api.put("/loads/{lid}")
 async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write)):
-    load = await safe_db(db.loads.find_one({"id": lid}, {"_id": 0}), "load lookup")
+    load = await safe_db(db.loads.find_one(tenant_filter(user, {"id": lid}), {"_id": 0}), "load lookup")
     if not load: raise HTTPException(404, "Not found")
     updates = data.model_dump(mode="json", exclude_unset=True)
+    if "driver_id" in updates: await require_tenant_reference(db.drivers, user, updates["driver_id"], "driver")
+    if "truck_id" in updates: await require_tenant_reference(db.trucks, user, updates["truck_id"], "truck")
     updates["updated_at"] = now_iso()
     miles, rate = updates.get("miles", load.get("miles", 0)), updates.get("rate", load.get("rate", 0))
     if "miles" in updates or "rate" in updates:
         updates["rpm"] = round(rate / miles, 2) if miles > 0 and rate > 0 else 0
-    result = await safe_db(db.loads.update_one({"id": lid}, {"$set": updates}), "load update")
+    result = await safe_db(db.loads.update_one(tenant_filter(user, {"id": lid}), {"$set": updates}), "load update")
     if not result.matched_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 @api.delete("/loads/{lid}")
 async def delete_load(lid: str, user=Depends(operational_write)):
-    result = await safe_db(db.loads.delete_one({"id": lid}), "load delete")
+    result = await safe_db(db.loads.delete_one(tenant_filter(user, {"id": lid})), "load delete")
     if not result.deleted_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
 @api.post("/loads/{lid}/stage")
 async def change_stage(lid: str, data: SafeStageChange, user=Depends(operational_write)):
-    load = await safe_db(db.loads.find_one({"id": lid}, {"_id": 0}), "load stage lookup")
+    load = await safe_db(db.loads.find_one(tenant_filter(user, {"id": lid}), {"_id": 0}), "load stage lookup")
     if not load: raise HTTPException(404, "Not found")
     try: old_stage = LoadStage(load.get("stage", ""))
     except ValueError: raise HTTPException(409, "Current load stage is invalid")
@@ -351,47 +378,49 @@ async def change_stage(lid: str, data: SafeStageChange, user=Depends(operational
     if stage == "Invoice Pending": updates["invoice_status"] = "Ready to Invoice"
     if stage == "Payment Pending": updates["invoice_status"] = "Payment Pending"
     if stage == "Closed": updates["payment_status"] = "Paid"; updates["invoice_status"] = "Paid"
-    transition_query = {"id": lid, "stage": old}
+    transition_query = tenant_filter(user, {"id": lid, "stage": old})
     if old_stage == LoadStage.EXCEPTION:
         transition_query["exception_origin_stage"] = origin_value
     result = await safe_db(db.loads.update_one(transition_query, mongo_update), "load stage update")
     if not result.matched_count:
         raise HTTPException(409, "Load stage changed concurrently")
-    await log_activity_best_effort(lid, "Stage Change", old, stage, user.get("name", user["id"]), data.notes)
+    await log_activity_best_effort(user, lid, "Stage Change", old, stage, user.get("name", user["id"]), data.notes)
     return {"ok": True, "stage": stage}
 
 # ============ ACTIVITY LOG ============
-async def log_activity(load_id, action, old, new, user, notes=""):
-    entry = {
+async def log_activity(current_user, load_id, action, old, new, actor, notes=""):
+    entry = tenant_document(current_user, {
         "id": new_id("A"), "load_id": load_id, "action": action,
         "old_status": old, "new_status": new,
-        "updated_by": user, "timestamp": now_iso(), "notes": notes
-    }
+        "updated_by": actor, "timestamp": now_iso(), "notes": notes
+    })
     await safe_db(db.activity.insert_one(entry), "activity create")
 
-async def log_activity_best_effort(load_id, action, old, new, user, notes=""):
+async def log_activity_best_effort(current_user, load_id, action, old, new, actor, notes=""):
     """Temporary degraded-audit policy until a transactional outbox exists."""
     try:
-        await log_activity(load_id, action, old, new, user, notes)
+        await log_activity(current_user, load_id, action, old, new, actor, notes)
     except Exception:
         logging.warning("Activity logging failed after successful primary write")
 
 @api.get("/activity")
-async def list_activity(load_id: Optional[str] = None):
-    q = {"load_id": load_id} if load_id else {}
+async def list_activity(load_id: Optional[str] = None, user=Depends(get_current_user)):
+    q = tenant_filter(user, {"load_id": load_id} if load_id else None)
     return await db.activity.find(q, {"_id": 0}).sort("timestamp", -1).to_list(500)
 
 # ============ DOCUMENTS ============
 @api.get("/documents")
-async def list_docs(load_id: Optional[str] = None):
-    q = {"load_id": load_id} if load_id else {}
+async def list_docs(load_id: Optional[str] = None, user=Depends(get_current_user)):
+    if load_id: await require_tenant_reference(db.loads, user, load_id, "load")
+    q = tenant_filter(user, {"load_id": load_id} if load_id else None)
     return await db.documents.find(q, {"_id": 0}).to_list(1000)
 
 @api.post("/documents")
 async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
-    doc = {"id": new_id("DOC"), **d.model_dump(mode="json"), "uploaded_at": now_iso(), "uploaded_by": user.get("name", user["id"])}
+    await require_tenant_reference(db.loads, user, d.load_id, "load")
+    doc = tenant_document(user, {"id": new_id("DOC"), **d.model_dump(mode="json"), "uploaded_at": now_iso(), "uploaded_by": user.get("name", user["id"])})
     await safe_db(db.documents.insert_one(doc), "document create"); clean_doc(doc)
-    await log_activity_best_effort(d.load_id, f"Uploaded {d.doc_type.value}", "", "", doc["uploaded_by"], d.filename)
+    await log_activity_best_effort(user, d.load_id, f"Uploaded {d.doc_type.value}", "", "", doc["uploaded_by"], d.filename)
     return doc
 
 # ============ INVOICES ============
@@ -408,19 +437,20 @@ class InternalSeedInvoice(BaseModel):
     created_at: str = Field(default_factory=now_iso)
 
 @api.get("/invoices")
-async def list_invoices():
-    return await db.invoices.find({}, {"_id": 0}).to_list(1000)
+async def list_invoices(user=Depends(get_current_user)):
+    return await db.invoices.find(tenant_filter(user), {"_id": 0}).to_list(1000)
 
 @api.post("/invoices")
 async def create_invoice(inv: InvoiceCreate, user=Depends(finance_write)):
-    doc = {"id": new_id("INV"), **inv.model_dump(mode="json"), "created_at": now_iso()}; await safe_db(db.invoices.insert_one(doc), "invoice create"); clean_doc(doc)
+    await require_tenant_reference(db.loads, user, inv.load_id, "load")
+    doc = tenant_document(user, {"id": new_id("INV"), **inv.model_dump(mode="json"), "created_at": now_iso()}); await safe_db(db.invoices.insert_one(doc), "invoice create"); clean_doc(doc)
     return doc
 
 @api.put("/invoices/{iid}")
 async def update_invoice(iid: str, data: InvoiceUpdate, user=Depends(finance_write)):
-    if not await safe_db(db.invoices.find_one({"id": iid}, {"_id": 0}), "invoice lookup"): raise HTTPException(404, "Not found")
+    if not await safe_db(db.invoices.find_one(tenant_filter(user, {"id": iid}), {"_id": 0}), "invoice lookup"): raise HTTPException(404, "Not found")
     updates = data.model_dump(mode="json", exclude_unset=True); updates["updated_at"] = now_iso()
-    result = await safe_db(db.invoices.update_one({"id": iid}, {"$set": updates}), "invoice update")
+    result = await safe_db(db.invoices.update_one(tenant_filter(user, {"id": iid}), {"$set": updates}), "invoice update")
     if not result.matched_count: raise HTTPException(404, "Not found")
     return {"ok": True}
 
@@ -453,6 +483,7 @@ async def weather_check(data: WeatherCheckRequest, user=Depends(operational_writ
 
 @api.post("/roads/check")
 async def roads_check(data: LoadIdRequest, user=Depends(operational_write)):
+    await require_tenant_reference(db.loads, user, data.load_id, "load")
     random.seed(hash(str(data.model_dump())+"r") & 0x7fffffff)
     return {
         "traffic_delay_min": random.randint(0, 45),
@@ -465,9 +496,15 @@ async def roads_check(data: LoadIdRequest, user=Depends(operational_write)):
 
 @api.post("/samsara/vehicle")
 async def samsara_vehicle(data: SamsaraVehicleRequest, user=Depends(operational_write)):
-    vid = data.vehicle_id
+    identifier = {"id": data.truck_id} if data.truck_id is not None else {"samsara_id": data.vehicle_id}
+    truck = await safe_db(db.trucks.find_one(tenant_filter(user, identifier), {"_id": 0}), "Samsara truck lookup")
+    if not truck:
+        raise HTTPException(404, "Not found")
+    vid = truck.get("samsara_id") or f"simulated:{truck['id']}"
     random.seed(hash(vid) & 0x7fffffff)
     return {
+        "simulated": True,
+        "truck_id": truck["id"],
         "vehicle_id": vid,
         "location": f"{random.choice(['Amarillo TX','OKC OK','Little Rock AR','Nashville TN','Flagstaff AZ'])}",
         "engine": random.choice(["ON","ON","OFF"]),
@@ -483,6 +520,7 @@ async def samsara_vehicle(data: SamsaraVehicleRequest, user=Depends(operational_
 
 @api.post("/fuel/plan")
 async def fuel_plan(data: LoadIdRequest, user=Depends(operational_write)):
+    await require_tenant_reference(db.loads, user, data.load_id, "load")
     random.seed(hash(str(data.model_dump())+"f") & 0x7fffffff)
     stops = ["Loves","Pilot","TA","Flying J","Sapp Bros","Petro"]
     return {
@@ -500,6 +538,7 @@ async def fuel_plan(data: LoadIdRequest, user=Depends(operational_write)):
 
 @api.post("/truckstops/plan")
 async def truckstop_plan(data: LoadIdRequest, user=Depends(operational_write)):
+    await require_tenant_reference(db.loads, user, data.load_id, "load")
     random.seed(hash(str(data.model_dump())+"ts") & 0x7fffffff)
     return {
         "name": random.choice(["Loves 344","Pilot 208","TA Ontario","Sapp Bros"]),
@@ -511,13 +550,14 @@ async def truckstop_plan(data: LoadIdRequest, user=Depends(operational_write)):
 
 @api.post("/alerts/generate")
 async def generate_alert(a: DriverAlertRequest, user=Depends(operational_write)):
-    load = await safe_db(db.loads.find_one({"id": a.load_id}, {"_id": 0}), "alert load lookup")
+    load = await safe_db(db.loads.find_one(tenant_filter(user, {"id": a.load_id}), {"_id": 0}), "alert load lookup")
+    if not load: raise HTTPException(404, "Not found")
     driver = None; truck = None
     if load:
         if load.get("driver_id"):
-            driver = await safe_db(db.drivers.find_one({"id": load["driver_id"]}, {"_id": 0}), "alert driver lookup")
+            driver = await safe_db(db.drivers.find_one(tenant_filter(user, {"id": load["driver_id"]}), {"_id": 0}), "alert driver lookup")
         if load.get("truck_id"):
-            truck = await safe_db(db.trucks.find_one({"id": load["truck_id"]}, {"_id": 0}), "alert truck lookup")
+            truck = await safe_db(db.trucks.find_one(tenant_filter(user, {"id": load["truck_id"]}), {"_id": 0}), "alert truck lookup")
     msg = f"""DRIVER ALERT
 Load ID: {a.load_id}
 Driver: {driver['name'] if driver else 'Unassigned'}
@@ -529,17 +569,18 @@ Issue: {a.message}
 ETA: {load.get('eta','TBD') if load else 'TBD'}
 Next update required by: {(datetime.now(timezone.utc)+timedelta(hours=2)).strftime('%H:%M UTC')}
 Dispatcher: {user.get('name', user['id'])}"""
-    await log_activity(a.load_id, "Driver Alert Generated", "", a.alert_type.value, user.get("name", user["id"]), a.message)
+    await log_activity(user, a.load_id, "Driver Alert Generated", "", a.alert_type.value, user.get("name", user["id"]), a.message)
     return {"message": msg}
 
 # ============ AI ASSISTANT (Claude Sonnet) ============
 @api.post("/ai/chat")
 async def ai_chat(data: AiChatRequest, user=Depends(ai_access)):
     # Gather live data context
-    loads = await safe_db(db.loads.find({}, {"_id": 0}).to_list(200), "AI load context")
-    trucks = await safe_db(db.trucks.find({}, {"_id": 0}).to_list(200), "AI truck context")
-    drivers = await safe_db(db.drivers.find({}, {"_id": 0}).to_list(200), "AI driver context")
-    invoices = await safe_db(db.invoices.find({}, {"_id": 0}).to_list(200), "AI invoice context")
+    scope = tenant_filter(user)
+    loads = await safe_db(db.loads.find(scope, {"_id": 0}).to_list(200), "AI load context")
+    trucks = await safe_db(db.trucks.find(scope, {"_id": 0}).to_list(200), "AI truck context")
+    drivers = await safe_db(db.drivers.find(scope, {"_id": 0}).to_list(200), "AI driver context")
+    invoices = await safe_db(db.invoices.find(scope, {"_id": 0}).to_list(200), "AI invoice context")
     context = f"""Live business data snapshot (JSON):
 LOADS ({len(loads)}): {loads[:20]}
 TRUCKS ({len(trucks)}): {trucks[:15]}
@@ -587,11 +628,12 @@ def rule_based_answer(q, loads, trucks, drivers, invoices):
 
 # ============ DASHBOARD ============
 @api.get("/dashboard/stats")
-async def dashboard_stats():
-    loads = await db.loads.find({}, {"_id": 0}).to_list(2000)
-    trucks = await db.trucks.find({}, {"_id": 0}).to_list(1000)
-    drivers = await db.drivers.find({}, {"_id": 0}).to_list(1000)
-    invoices = await db.invoices.find({}, {"_id": 0}).to_list(2000)
+async def dashboard_stats(user=Depends(get_current_user)):
+    scope = tenant_filter(user)
+    loads = await db.loads.find(scope, {"_id": 0}).to_list(2000)
+    trucks = await db.trucks.find(scope, {"_id": 0}).to_list(1000)
+    drivers = await db.drivers.find(scope, {"_id": 0}).to_list(1000)
+    invoices = await db.invoices.find(scope, {"_id": 0}).to_list(2000)
 
     def in_stage(*stages): return [l for l in loads if l.get("stage") in stages]
     total_rev = sum(l.get("rate",0) for l in loads)
@@ -627,10 +669,11 @@ async def dashboard_stats():
     }
 
 @api.get("/dashboard/charts")
-async def dashboard_charts():
-    loads = await db.loads.find({}, {"_id": 0}).to_list(2000)
-    trucks = await db.trucks.find({}, {"_id": 0}).to_list(1000)
-    drivers = await db.drivers.find({}, {"_id": 0}).to_list(1000)
+async def dashboard_charts(user=Depends(get_current_user)):
+    scope = tenant_filter(user)
+    loads = await db.loads.find(scope, {"_id": 0}).to_list(2000)
+    trucks = await db.trucks.find(scope, {"_id": 0}).to_list(1000)
+    drivers = await db.drivers.find(scope, {"_id": 0}).to_list(1000)
 
     # revenue by week (last 6 weeks) - synthesize from load dates
     weeks = []
@@ -674,13 +717,14 @@ def enforce_seed_config(force: bool) -> None:
 @api.post("/seed")
 async def seed(force: bool = False, user=Depends(owner_only)):
     enforce_seed_config(force)
+    scope = tenant_filter(user)
     if not force:
-        c = await db.loads.count_documents({})
+        c = await db.loads.count_documents(scope)
         if c > 0:
             return {"ok": True, "already_seeded": True, "count": c}
-    await db.loads.delete_many({}); await db.trucks.delete_many({})
-    await db.drivers.delete_many({}); await db.activity.delete_many({})
-    await db.invoices.delete_many({}); await db.documents.delete_many({})
+    await db.loads.delete_many(scope); await db.trucks.delete_many(scope)
+    await db.drivers.delete_many(scope); await db.activity.delete_many(scope)
+    await db.invoices.delete_many(scope); await db.documents.delete_many(scope)
 
     # Users are NOT pre-seeded. Every user must self-register via /api/auth/signup.
 
@@ -713,7 +757,7 @@ async def seed(force: bool = False, user=Depends(owner_only)):
             profit_per_mile=round(random.uniform(0.35, 0.95),2),
         ).model_dump()
         t["annual_inspection_expiry"] = (datetime.now(timezone.utc)+timedelta(days=insp_days)).isoformat()
-        truck_docs.append(t)
+        truck_docs.append(tenant_document(user, t))
     await db.trucks.insert_many(truck_docs)
 
     # Drivers
@@ -751,7 +795,7 @@ async def seed(force: bool = False, user=Depends(owner_only)):
         d["clearinghouse_status"] = random.choice(["Clear","Clear","Pending","Clear","Issue"])
         d["employment_verification"] = random.choice(["Complete","Complete","Pending"])
         d["driver_type"] = random.choice(["Solo","Solo","Team"])
-        driver_docs.append(d)
+        driver_docs.append(tenant_document(user, d))
     await db.drivers.insert_many(driver_docs)
 
     # Loads
@@ -797,25 +841,25 @@ async def seed(force: bool = False, user=Depends(owner_only)):
             lumper=random.choice([0,0,150,250]), driver_pay=round(miles*driver_docs[d_idx]["cents_per_mile"],0),
             factoring_fee=round(rate*0.03,0), other_expenses=round(random.uniform(0,120),0),
         ).model_dump()
-        load_docs.append(l)
+        load_docs.append(tenant_document(user, l))
     await db.loads.insert_many(load_docs)
 
     # Invoices for loads at invoice stage or beyond
     inv_docs = []
     for l in load_docs:
         if l["stage"] in ("Invoice Pending","Payment Pending","Docs Pending"):
-            inv_docs.append(InternalSeedInvoice(
+            inv_docs.append(tenant_document(user, InternalSeedInvoice(
                 load_id=l["id"], customer=l["customer"], amount=l["rate"],
                 status=l["invoice_status"], due_date=(datetime.now(timezone.utc)+timedelta(days=30)).isoformat()
-            ).model_dump())
+            ).model_dump()))
     if inv_docs: await db.invoices.insert_many(inv_docs)
 
     # Activity
     for l in load_docs:
         actor = user.get("name", user["id"])
-        await log_activity(l["id"], "Load Created", "", "Booked", actor, "Seeded")
+        await log_activity(user, l["id"], "Load Created", "", "Booked", actor, "Seeded")
         if l["stage"] != "Booked":
-            await log_activity(l["id"], "Stage Change", "Booked", l["stage"], actor, "")
+            await log_activity(user, l["id"], "Stage Change", "Booked", l["stage"], actor, "")
 
     return {"ok": True, "loads": len(load_docs), "trucks": len(truck_docs), "drivers": len(driver_docs), "invoices": len(inv_docs)}
 
@@ -830,23 +874,25 @@ DEFAULT_ASSUMPTIONS = {
 }
 
 @api.get("/assumptions")
-async def get_assumptions():
-    doc = await db.assumptions.find_one({"id": "default"}, {"_id": 0})
+async def get_assumptions(user=Depends(get_current_user)):
+    predicate = tenant_filter(user, {"id": "default"})
+    doc = await db.assumptions.find_one(predicate, {"_id": 0})
     if not doc:
-        await db.assumptions.insert_one(DEFAULT_ASSUMPTIONS.copy())
-        return DEFAULT_ASSUMPTIONS
+        defaults = tenant_document(user, DEFAULT_ASSUMPTIONS)
+        await db.assumptions.insert_one(defaults)
+        return defaults
     return doc
 
 @api.put("/assumptions")
 async def update_assumptions(data: AssumptionUpdate, user=Depends(finance_write)):
     updates = data.model_dump(mode="json", exclude_unset=True)
-    await safe_db(db.assumptions.update_one({"id": "default"}, {"$set": updates}, upsert=True), "assumption update")
+    await safe_db(db.assumptions.update_one(tenant_filter(user, {"id": "default"}), {"$set": updates, "$setOnInsert": tenant_document(user, {"id": "default"})}, upsert=True), "assumption update")
     return {"ok": True}
 
 # ============ LOAD DECISION ENGINE ============
 @api.post("/loads/analyze")
 async def analyze_load(data: LoadAnalysisRequest, user=Depends(operational_write)):
-    a = await safe_db(db.assumptions.find_one({"id": "default"}, {"_id": 0}), "analysis assumption lookup") or DEFAULT_ASSUMPTIONS
+    a = await safe_db(db.assumptions.find_one(tenant_filter(user, {"id": "default"}), {"_id": 0}), "analysis assumption lookup") or tenant_document(user, DEFAULT_ASSUMPTIONS)
     fuel_price = data.fuel_price if data.fuel_price is not None else a["fuel_price"]
     mpg = data.mpg if data.mpg is not None else a["mpg"]
     driver_cpm = data.driver_pay_cpm if data.driver_pay_cpm is not None else (a["driver_pay_team_cpm"] if data.driver_type.value == "Team" else a["driver_pay_solo_cpm"])
@@ -942,9 +988,10 @@ def _days_until(iso_str):
         return None
 
 @api.get("/compliance")
-async def compliance_overview():
-    drivers = await db.drivers.find({}, {"_id": 0}).to_list(1000)
-    trucks = await db.trucks.find({}, {"_id": 0}).to_list(1000)
+async def compliance_overview(user=Depends(get_current_user)):
+    scope = tenant_filter(user)
+    drivers = await db.drivers.find(scope, {"_id": 0}).to_list(1000)
+    trucks = await db.trucks.find(scope, {"_id": 0}).to_list(1000)
     items = []
 
     for d in drivers:

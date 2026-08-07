@@ -8,6 +8,7 @@ import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 import server
+VALID_TENANT = "ten_" + "a" * 32
 
 
 class Cursor:
@@ -18,17 +19,18 @@ class Cursor:
 class Collection:
     def __init__(self, docs=None):
         self.docs=list(docs or []); self.last_update=None; self.last_query=None; self.fail=False; self.matched_count_override=None
+        for doc in self.docs: doc.setdefault("tenant_id", VALID_TENANT)
     async def find_one(self, query, *args):
         if self.fail: raise RuntimeError("mongodb://secret-host/private collection query")
-        return next((dict(d) for d in self.docs if all(d.get(k)==v for k,v in query.items())), None)
-    def find(self, *args, **kwargs): return Cursor(self.docs)
+        return next((dict(d) for d in self.docs if all(d.get(k, VALID_TENANT if k=="tenant_id" else None)==v for k,v in query.items())), None)
+    def find(self, query=None, **kwargs): return Cursor([d for d in self.docs if all(d.get(k, VALID_TENANT if k=="tenant_id" else None)==v for k,v in (query or {}).items())])
     async def insert_one(self, doc):
         if self.fail: raise RuntimeError("mongodb://secret-host/private collection insert")
         self.docs.append(dict(doc)); return SimpleNamespace(inserted_id="fake")
     async def update_one(self, query, update, **kwargs):
         if self.fail: raise RuntimeError("mongodb://secret-host/private collection update")
         self.last_query=query; self.last_update=update
-        matches=[doc for doc in self.docs if all(doc.get(k)==v for k,v in query.items())]
+        matches=[doc for doc in self.docs if all(doc.get(k, VALID_TENANT if k=="tenant_id" else None)==v for k,v in query.items())]
         matched=len(matches) if self.matched_count_override is None else self.matched_count_override
         modified=0
         if matched:
@@ -39,19 +41,19 @@ class Collection:
         return SimpleNamespace(matched_count=matched, modified_count=modified)
     async def delete_one(self, query):
         if self.fail: raise RuntimeError("mongodb://secret-host/private collection delete")
-        before=len(self.docs); self.docs=[d for d in self.docs if not all(d.get(k)==v for k,v in query.items())]
+        before=len(self.docs); self.docs=[d for d in self.docs if not all(d.get(k, VALID_TENANT if k=="tenant_id" else None)==v for k,v in query.items())]
         return SimpleNamespace(deleted_count=before-len(self.docs))
 
 class FakeDB:
     def __init__(self):
-        for name in ("users","loads","activity","trucks","drivers","documents","invoices","assumptions"):
+        for name in ("users","tenants","loads","activity","trucks","drivers","documents","invoices","assumptions"):
             setattr(self, name, Collection())
 
 @pytest.fixture
 def api(monkeypatch):
     fake=FakeDB(); monkeypatch.setattr(server, "db", fake); server.app.dependency_overrides.clear()
     def role(name):
-        async def dependency(): return {"id":f"U-{name}", "name":"Authenticated Actor", "role":name}
+        async def dependency(): return {"id":f"U-{name}", "name":"Authenticated Actor", "role":name, "tenant_id":VALID_TENANT}
         server.app.dependency_overrides[server.get_current_user]=dependency
     yield TestClient(server.app), fake, role
     server.app.dependency_overrides.clear()
@@ -68,7 +70,7 @@ def test_no_operational_route_uses_raw_dict_and_unknown_fields_are_422(api):
     client, _, role=api; role("owner")
     payloads={
         "/api/routing/calc":{"pickup":"A","delivery":"B"}, "/api/weather/check":{"pickup":"A","delivery":"B"},
-        "/api/roads/check":{"load_id":"L1"}, "/api/samsara/vehicle":{"vehicle_id":"V1"},
+        "/api/roads/check":{"load_id":"L1"}, "/api/samsara/vehicle":{"truck_id":"T1"},
         "/api/fuel/plan":{"load_id":"L1"}, "/api/truckstops/plan":{"load_id":"L1"},
         "/api/alerts/generate":{"load_id":"L1","alert_type":"road"},
         "/api/loads/analyze":{"offered_rate":100,"loaded_miles":10}, "/api/ai/chat":{"message":"hello"},
@@ -153,14 +155,14 @@ def test_database_errors_are_sanitized(api):
     assert "mongodb" not in response.text.lower() and "collection" not in response.text.lower()
 
 def test_document_activity_failure_does_not_false_fail_primary_write(api, caplog):
-    client, db, role=api; role("operations"); db.activity.fail=True
+    client, db, role=api; role("operations"); db.loads.docs=[{"id":"L1","tenant_id":VALID_TENANT}]; db.activity.fail=True
     response=client.post("/api/documents", json={"load_id":"L1","doc_type":"pod","filename":"pod.pdf","url":"mock://pod.pdf"})
     assert response.status_code==200 and db.documents.docs[-1]["filename"]=="pod.pdf"
     assert "Activity logging failed after successful primary write" in caplog.text
 
 def test_corrected_frontend_payloads(api):
     client, db, role=api
-    role("operations"); db.loads.docs=[{"id":"L1","stage":"Booked","rate":100,"miles":10}]
+    role("operations"); db.loads.docs=[{"id":"L1","stage":"Booked","rate":100,"miles":10}]; db.drivers.docs=[{"id":"D1","tenant_id":VALID_TENANT}]; db.trucks.docs=[{"id":"T1","tenant_id":VALID_TENANT}]
     assert client.put("/api/loads/L1", json={"driver_id":"D1","truck_id":"T1"}).status_code==200
     assert client.post("/api/loads/L1/stage", json={"stage":"Assigned","notes":"Assigned driver and truck"}).status_code==200
     assert client.post("/api/documents", json={"load_id":"L1","doc_type":"pod","filename":"pod_L1.pdf","url":"mock://pod_L1.pdf"}).status_code==200

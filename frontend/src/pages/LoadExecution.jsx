@@ -108,8 +108,16 @@ export default function LoadExecution() {
     toast.success("Fuel stop planned");
   };
   const fetchSamsara = async () => {
-    const { data } = await api.post("/samsara/vehicle", { vehicle_id: truck?.samsara_id || "VEH000" });
-    setSamsara(data);
+    if (!truck) {
+      setSamsara(null);
+      return;
+    }
+    try {
+      const { data } = await api.post("/samsara/vehicle", { truck_id: truck.id });
+      setSamsara(data);
+    } catch {
+      setSamsara(null);
+    }
   };
 
   const generateAlert = async (type, msg) => {
@@ -277,7 +285,7 @@ export default function LoadExecution() {
           <div className="terminal-card p-4">
             <div className="flex items-center justify-between mb-2">
               <div className="kpi-label flex items-center gap-1.5"><Satellite className="w-3.5 h-3.5" /> Samsara / Telematics</div>
-              <button onClick={fetchSamsara} className="text-[10px] font-mono text-sky-400 hover:underline" data-testid="samsara-refresh">Refresh</button>
+              <button onClick={fetchSamsara} disabled={!truck} className="text-[10px] font-mono text-sky-400 hover:underline disabled:text-zinc-600" data-testid="samsara-refresh">Refresh</button>
             </div>
             {samsara ? (
               <div className="text-xs font-mono space-y-1">
@@ -288,7 +296,7 @@ export default function LoadExecution() {
                 <div>Idle: {samsara.idle_minutes} min · Harsh events: {samsara.harsh_events}</div>
                 <div className="text-zinc-500 text-[10px] pt-1">Last sync: {samsara.last_sync?.slice(11,19)}</div>
               </div>
-            ) : <div className="text-xs text-zinc-500">Assign a truck to see live telematics</div>}
+            ) : <div className="text-xs text-zinc-500">{truck ? "Telematics unavailable" : "Assign a truck to see live telematics"}</div>}
           </div>
 
           <div className="terminal-card p-4 lg:col-span-2">
