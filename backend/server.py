@@ -24,6 +24,9 @@ from app.party_verification_routes import register_party_verification_routes
 from app.execution_eligibility_routes import register_execution_eligibility_routes
 from app.pickup_release_routes import register_pickup_release_routes
 from app.in_transit_execution_routes import register_in_transit_execution_routes
+from app.invoice_readiness_routes import register_invoice_readiness_routes
+from app.invoice_readiness_invalidation import invalidate_invoice_readiness
+from app.domain.invoice_readiness import BILLING_DOCUMENT_TYPES
 from app.pickup_release_invalidation import preinvalidate_pickup_release, preinvalidate_pickup_for_execution_snapshot
 from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation, is_insurance_document
 from app.execution_invalidation import preinvalidate_for_load, preinvalidate_for_snapshot
@@ -497,6 +500,8 @@ async def change_stage(lid: str, data: SafeStageChange, user=Depends(operational
     stage_action = "load.exception_entered" if stage == "Exception" else ("load.exception_recovered" if old_stage == LoadStage.EXCEPTION else "load.stage_changed")
     audit = await begin_audit(db.audit_events, user, stage_action, AuditEntityType.LOAD, lid,
                               changed_fields=list(updates), previous=load)
+    if old == "Delivered" and stage != "Delivered":
+        await invalidate_invoice_readiness(db,user,lid,"delivery_basis_changed",["load_stage"])
     transition_query = tenant_filter(user, {"id": lid, "stage": old})
     if old_stage == LoadStage.EXCEPTION:
         transition_query["exception_origin_stage"] = origin_value
@@ -596,6 +601,8 @@ async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
             if invalidation_plan["required"]:
                 invalidation_audit = await begin_audit(db.audit_events, user, "load_passport.material_change_invalidated", AuditEntityType.LOAD_PASSPORT, passport["id"], changed_fields=["rate_confirmation", "status", "version"], previous=passport)
     audit = await begin_audit(db.audit_events, user, "document.created", AuditEntityType.DOCUMENT, doc["id"], changed_fields=list(d.model_fields_set), previous={"load_id": d.load_id})
+    if d.doc_type.value in BILLING_DOCUMENT_TYPES:
+        await invalidate_invoice_readiness(db,user,d.load_id,"billing_document_changed",[d.doc_type.value])
     execution_cases=await preinvalidate_for_load(db,user,d.load_id,["rate_confirmation" if relevant_change=="rate_confirmation" else "party_verification"]) if relevant_change else []
     if execution_cases and passport:
         passport=await passport_collection.find_one(tenant_filter(user,{"id":passport["id"]}),{"_id":0})
@@ -1278,6 +1285,7 @@ register_party_verification_routes(api, _DynamicDBProxy(), get_current_user)
 register_execution_eligibility_routes(api, _DynamicDBProxy(), get_current_user)
 register_pickup_release_routes(api, _DynamicDBProxy(), get_current_user)
 register_in_transit_execution_routes(api, _DynamicDBProxy(), get_current_user)
+register_invoice_readiness_routes(api, _DynamicDBProxy(), get_current_user)
 
 @public_api.get("/")
 async def root():
