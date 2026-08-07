@@ -7,6 +7,7 @@ from app.tenant import tenant_filter, tenant_document
 from app.domain.party_verification import DOMAINS, now, snapshots, evaluate, assert_mutable, qualified_insurance_documents, rate_confirmation_required
 from app.schemas.party_verification import CaseCreate,CaseUpdate,EmptyAction,ReasonAction,ReviewUpdate,FindingUpdate,EvidenceAdd,ReviewDomain,ReviewResult,FindingResolution
 from app.execution_invalidation import preinvalidate_for_load
+from app.pickup_release_invalidation import preinvalidate_pickup_release
 
 ADMIN={"owner","admin"}; OPS=ADMIN|{"operations","dispatcher"}; DOMAIN_ROLES={"broker_identity":OPS,"shipper_identity":OPS,"contact_validation":OPS|{"finance"},"pickup_instructions":OPS,"carrier_authority":ADMIN|{"safety","compliance"},"insurance_evidence":ADMIN|{"safety","compliance","finance"},"fraud_risk":ADMIN|{"safety","compliance","finance"}}
 ALLOWED={"draft":{"review_pending"},"review_pending":{"findings_open","cleared","blocked"},"findings_open":{"review_pending","cleared","blocked"},"blocked":{"review_pending"},"cleared":{"expired","revoked"},"expired":{"review_pending"},"revoked":{"review_pending"}}
@@ -161,7 +162,7 @@ def register_party_verification_routes(api,db,get_current_user):
         role(user,ADMIN); current=await one(db,user,cid)
         if "blocked" not in ALLOWED.get(current["status"],set()): raise HTTPException(409,f"Transition from {current['status']} to blocked is not allowed")
         parent=await begin_audit(db.audit_events,user,"party_verification.blocked",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["status","version"],previous=current)
-        await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"blocked","party_verification.blocked",data.reason,current,parent); await sync_passport(user,out,False); return out
+        await preinvalidate_pickup_release(db,user,current["load_id"],["party_verification"]); await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"blocked","party_verification.blocked",data.reason,current,parent); await sync_passport(user,out,False); return out
     @api.post("/party-verification-cases/{cid}/return-to-review")
     async def return_review(cid:str,data:EmptyAction,user=Depends(get_current_user)): role(user,ADMIN); return await transition(cid,user,"review_pending","party_verification.returned_to_review")
     @api.post("/party-verification-cases/{cid}/expire")
@@ -169,10 +170,10 @@ def register_party_verification_routes(api,db,get_current_user):
         role(user,ADMIN); current=await one(db,user,cid)
         if "expired" not in ALLOWED.get(current["status"],set()): raise HTTPException(409,f"Transition from {current['status']} to expired is not allowed")
         parent=await begin_audit(db.audit_events,user,"party_verification.expired",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["status","version"],previous=current)
-        await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"expired","party_verification.expired","",current,parent); await sync_passport(user,out,False); return out
+        await preinvalidate_pickup_release(db,user,current["load_id"],["party_verification"]); await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"expired","party_verification.expired","",current,parent); await sync_passport(user,out,False); return out
     @api.post("/party-verification-cases/{cid}/revoke")
     async def revoke(cid:str,data:ReasonAction,user=Depends(get_current_user)):
         role(user,ADMIN); current=await one(db,user,cid)
         if "revoked" not in ALLOWED.get(current["status"],set()): raise HTTPException(409,f"Transition from {current['status']} to revoked is not allowed")
         parent=await begin_audit(db.audit_events,user,"party_verification.revoked",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["status","version"],previous=current)
-        await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"revoked","party_verification.revoked",data.reason,current,parent); await sync_passport(user,out,False); return out
+        await preinvalidate_pickup_release(db,user,current["load_id"],["party_verification"]); await preinvalidate_for_load(db,user,current["load_id"],["party_verification"]); out=await transition(cid,user,"revoked","party_verification.revoked",data.reason,current,parent); await sync_passport(user,out,False); return out

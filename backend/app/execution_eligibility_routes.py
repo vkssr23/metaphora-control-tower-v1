@@ -5,6 +5,7 @@ from app.schemas.audit import AuditEntityType
 from app.schemas.execution_eligibility import CaseCreate,CaseUpdate,ManualCheckUpdate,HosUpdate,EvidenceAdd,EmptyAction,ReasonAction,CheckType,FindingUpdate
 from app.tenant import tenant_document,tenant_filter,require_tenant_id
 from app.domain.execution_eligibility import REQUIRED_CHECK_TYPES,EDITABLE_STATUSES,REFRESH_STATUSES,FINDING_MUTATION_STATUSES,TRANSITIONS,evaluate,passport_sync,utc_now
+from app.pickup_release_invalidation import preinvalidate_pickup_release
 
 ADMIN={"owner","admin"}; OPS={"owner","admin","operations","dispatcher"}; SAFETY={"owner","admin","safety","compliance"}
 SAFETY_CHECKS={"driver_operational_status","cdl_administrative_status","medical_card_administrative_status","mvr_administrative_status","clearinghouse_administrative_status","employment_verification_status","truck_operational_status","truck_maintenance_condition","truck_insurance_evidence","truck_equipment_compatibility","trailer_equipment_compatibility","load_weight_fit","commodity_equipment_fit"}
@@ -126,6 +127,7 @@ def register_execution_eligibility_routes(api,db,get_current_user):
         if target=="revoked": updates.update({"revoked_at":ts,"revoked_by":user["id"],"revocation_reason":reason})
         a=await begin_audit(db.audit_events,user,action,AuditEntityType.EXECUTION_ELIGIBILITY_CASE,cid,changed_fields=list(updates)+["version"],previous=c)
         if c["status"]=="eligible" and target in {"blocked","expired","revoked"}:
+            await preinvalidate_pickup_release(db,user,c["load_id"],["execution_eligibility"])
             passport=await db.load_passports.find_one(tenant_filter(user,{"id":c["passport_id"]}),{"_id":0})
             if not passport: await a.rejected("passport_not_found"); raise HTTPException(409,"Execution eligibility passport is unavailable")
             pupdate=passport_sync(passport,c,False,user["id"])
