@@ -7,6 +7,7 @@ from app.tenant import tenant_filter, tenant_document
 from app.domain.load_passports import build_preinvalidation, bounded_load_snapshot, calculate_profitability, material_categories, utc_now
 from app.domain.rate_confirmations import compare_rate_confirmation, validate_corrected_value, LOAD_FIELD_MAP, FINANCIAL
 from app.schemas.rate_confirmations import ExtractionCreate, ExtractionUpdate, ConfidenceUpdate, CompareAction, SubmitAction, AcceptAction, RejectAction, SupersedeAction, ResolutionUpdate, ResolutionStatus
+from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation
 
 ADMIN={"owner","admin"}; OPS=ADMIN|{"operations","dispatcher"}; FINANCE=ADMIN|{"finance"}
 def _role(user,roles):
@@ -149,8 +150,18 @@ def register_rate_confirmation_routes(api,db,get_current_user):
             value=r.get("corrected_value") if r["decision"]=="corrected_value" else d["document_value"]
             updates[lf]=value; selected.append(lf)
         material=sorted(set(selected)); audit=await begin_audit(db.audit_events,user,"rate_confirmation.accepted",AuditEntityType.RATE_CONFIRMATION_EXTRACTION,eid,changed_fields=["status","version"]+material,previous=e); passport=await db.load_passports.find_one(tenant_filter(user,{"load_id":e["load_id"]}),{"_id":0}); invalidation=None
-        if passport and material:
-            invalidation=build_preinvalidation(passport,material_categories(material),user["id"],utc_now())
+        case_collection=getattr(db,"party_verification_cases",None); verification_case=None; verification_plan=None
+        if case_collection is not None:
+            verification_case=await case_collection.find_one(tenant_filter(user,{"load_id":e["load_id"],"status":"cleared"}),{"_id":0})
+        if verification_case:
+            verification_plan=build_case_preinvalidation(verification_case,["rate_confirmation"],user["id"],utc_now()); va=await begin_audit(db.audit_events,user,"party_verification.material_change_invalidated",AuditEntityType.PARTY_VERIFICATION_CASE,verification_case["id"],changed_fields=["rate_confirmation","status","version"],previous=verification_case)
+            vr=await case_collection.update_one(tenant_filter(user,verification_plan["query"]),{"$set":verification_plan["update"]})
+            if not vr.matched_count: await va.rejected("version_conflict"); await audit.rejected("verification_version_conflict"); raise HTTPException(409,"Verification case changed concurrently; rate confirmation was not accepted")
+            await va.succeeded({"id":verification_case["id"],"load_id":e["load_id"],"status":"review_pending","version":verification_plan["update"]["version"]})
+        if passport and (material or verification_plan):
+            if verification_plan:
+                pp=build_passport_preinvalidation(passport,verification_plan["effects"],user["id"],utc_now()); invalidation={"required":True,"query":pp["query"],"update":pp["update"],"new_version":pp["update"]["version"]}
+            else: invalidation=build_preinvalidation(passport,material_categories(material),user["id"],utc_now())
             if invalidation["required"]:
                 ia=await begin_audit(db.audit_events,user,"load_passport.material_change_invalidated",AuditEntityType.LOAD_PASSPORT,passport["id"],changed_fields=material+["status","version"],previous=passport); ir=await db.load_passports.update_one(tenant_filter(user,invalidation["query"]),{"$set":invalidation["update"]})
                 if not ir.matched_count: await ia.rejected("version_conflict"); await audit.rejected("passport_version_conflict"); raise HTTPException(409,"Passport changed concurrently; load was not updated")

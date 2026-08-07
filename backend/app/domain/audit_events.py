@@ -30,6 +30,14 @@ ALLOWED_ACTIONS = {
     "rate_confirmation.superseded", "rate_confirmation.load_updated",
     "rate_confirmation.passport_synchronized",
     "rate_confirmation.extraction_confidence_updated",
+    "party_verification.created", "party_verification.updated",
+    "party_verification.snapshots_refreshed", "party_verification.evaluated",
+    "party_verification.submitted", "party_verification.review_updated",
+    "party_verification.finding_resolved", "party_verification.evidence_added",
+    "party_verification.cleared", "party_verification.blocked",
+    "party_verification.returned_to_review", "party_verification.expired",
+    "party_verification.revoked", "party_verification.material_change_invalidated",
+    "party_verification.passport_synchronized",
 }
 SAFE_FIELDS = {
     "id", "truck_number", "status", "assigned_driver_id", "assigned_truck_id",
@@ -42,6 +50,7 @@ SAFE_FIELDS = {
     "min_net_profit", "count", "force",
     "passport_id", "version", "checkpoint_type", "reason_code", "pickup_authorization_id",
     "extraction_id", "document_id", "revision", "discrepancy_id", "discrepancy_type",
+    "case_id", "review_domain", "finding_id", "risk_level", "signal_type",
 }
 SENSITIVE = re.compile(r"password|secret|token|credential|authorization|api.?key|database|mongo|jwt|header|body|content", re.I)
 MAX_FIELDS = 32
