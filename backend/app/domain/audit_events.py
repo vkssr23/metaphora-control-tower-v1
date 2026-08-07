@@ -58,6 +58,13 @@ ALLOWED_ACTIONS = {
     "execution_session.plan_amended", "execution_session.material_change_detected",
     "execution_exception.created", "execution_exception.acknowledged", "execution_exception.assigned",
     "execution_exception.escalated", "execution_exception.resolved", "execution_exception.waived",
+    "invoice_readiness.created", "invoice_readiness.updated", "invoice_readiness.refreshed",
+    "invoice_readiness.evaluated", "invoice_readiness.submitted_for_review",
+    "invoice_readiness.finding_resolved", "invoice_readiness.evidence_added",
+    "invoice_readiness.approved", "invoice_readiness.blocked", "invoice_readiness.reopened",
+    "invoice_readiness.material_change_invalidated", "accessorial.created", "accessorial.updated",
+    "accessorial.approved", "accessorial.rejected", "invoice_package.created",
+    "invoice_package.superseded", "invoice.ready_for_submission",
 }
 SAFE_FIELDS = {
     "id", "truck_number", "status", "assigned_driver_id", "assigned_truck_id",
@@ -73,6 +80,8 @@ SAFE_FIELDS = {
     "case_id", "review_domain", "finding_id", "risk_level", "signal_type", "release_case_id",
     "trailer_identifier", "custody_event_type", "changed_fields",
     "execution_state", "execution_health", "exception_id", "severity", "owner_role",
+    "readiness_case_id", "package_id", "accessorial_id", "accessorial_type", "currency",
+    "billable_total", "invoice_id", "verdict",
 }
 SENSITIVE = re.compile(r"password|secret|token|credential|authorization|api.?key|database|mongo|jwt|header|body|content", re.I)
 MAX_FIELDS = 32

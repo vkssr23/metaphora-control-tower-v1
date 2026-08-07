@@ -5,15 +5,23 @@ import api from "../lib/api";
 import { Money } from "../components/Badges";
 import { useNavigate } from "react-router-dom";
 import { toast, Toaster } from "sonner";
+import { useAuth } from "../lib/auth";
 
 const STATUSES = ["Not Ready","Docs Pending","Ready to Invoice","Invoice Created","Invoice Shared","Payment Pending","Paid","Disputed"];
 
 export default function Invoices() {
   const [invs, setInvs] = useState([]);
   const [loads, setLoads] = useState([]);
+  const [cases, setCases] = useState([]);
+  const { user } = useAuth();
   const nav = useNavigate();
-  const refresh = ()=>api.get("/invoices").then(r=>setInvs(r.data));
-  useEffect(()=>{ refresh(); api.get("/loads").then(r=>setLoads(r.data)); },[]);
+  const refresh = ()=>Promise.all([api.get("/invoices"),api.get("/invoice-readiness-cases")]).then(([i,c])=>{setInvs(i.data);setCases(c.data);});
+  useEffect(()=>{ refresh().catch(()=>setCases([])); api.get("/loads").then(r=>setLoads(r.data)); },[]);
+
+  const act = async (item, action) => {
+    try { await api.post(`/invoice-readiness-cases/${item.id}/${action}`, {version:item.version}); toast.success(action.replaceAll("-"," ")); refresh(); }
+    catch (e) { const code=e.response?.status; toast.error(`${code || "Error"}: ${e.response?.data?.detail || "Request failed"}`); }
+  };
 
   const updateStatus = async (id, status) => { await api.put(`/invoices/${id}`, {status}); toast.success("Updated"); refresh(); };
 
@@ -26,6 +34,23 @@ export default function Invoices() {
       <Toaster position="top-right" theme="dark" />
       <Topbar title="Invoices" subtitle={`${invs.length} invoices · pending ${total.toLocaleString('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0})}`} />
       <div className="p-6">
+        <div className="terminal-card p-4 mb-4">
+          <div className="flex items-center justify-between mb-3"><div><div className="text-sm font-semibold">Delivery evidence & invoice readiness</div><div className="text-[11px] text-zinc-500">Human-controlled finance handoff</div></div><div className="text-xs text-zinc-400">{cases.length} active cases</div></div>
+          <div className="space-y-2">
+            {cases.length===0 && <div className="text-xs text-zinc-500">No invoice-readiness cases yet. Create one from a delivered load through the API workflow.</div>}
+            {cases.map(c=><div key={c.id} className="border border-zinc-800 rounded p-3 text-xs">
+              <div className="flex flex-wrap gap-3 items-center"><span className="text-sky-400">{c.load_id}</span><span>{c.status}</span><span className={c.verdict==="ready"?"text-emerald-400":"text-amber-400"}>{c.verdict}</span><span>Billable: {c.billable_total ? <Money v={Number(c.billable_total)}/> : "unresolved"}</span><span>POD: {c.readiness_items?.find(x=>x.type==="pod_present")?.result || "pending"}</span><span>Rate confirmation: {c.readiness_items?.find(x=>x.type==="rate_confirmation_current")?.result || "pending"}</span></div>
+              {!!c.findings?.length && <div className="mt-2 text-red-300">Blockers: {c.findings.filter(x=>x.blocking && x.status==="open").map(x=>x.summary).join(", ") || "none"}</div>}
+              <div className="mt-2 flex gap-2">
+                {["finance","owner","admin"].includes(user?.role) && <button className="btn-secondary" onClick={()=>act(c,"refresh")}>Refresh</button>}
+                {["finance","owner","admin"].includes(user?.role) && <button className="btn-secondary" onClick={()=>act(c,"evaluate")}>Evaluate</button>}
+                {["owner","admin"].includes(user?.role) && c.status==="ready" && <button className="btn-primary" onClick={()=>act(c,"approve")}>Approve readiness</button>}
+                {["owner","admin"].includes(user?.role) && c.status==="approved" && <button className="btn-primary" onClick={()=>act(c,"invoice")}>Create invoice package</button>}
+              </div>
+            </div>)}
+          </div>
+          <p className="mt-3 text-[10px] leading-4 text-zinc-500">Invoice readiness is based on current internal delivery, rate and document records. Document authenticity, broker receipt, factoring acceptance, payment status and external accounting submission are not verified unless an authoritative integration explicitly provides that evidence.</p>
+        </div>
         <div className="grid grid-cols-3 gap-3 mb-4">
           <div className="terminal-card p-3"><div className="kpi-label">Pending</div><div className="kpi-value text-amber-400"><Money v={total} /></div></div>
           <div className="terminal-card p-3"><div className="kpi-label">Paid</div><div className="kpi-value text-emerald-400"><Money v={paid} /></div></div>
