@@ -147,6 +147,8 @@ def test_unresolved_blocking_prevents_acceptance(api):
  assert c.post("/api/rate-confirmation-extractions/rcx_one/accept",json={},headers=h("owner")).status_code==409 and not db.loads.update_calls and db.rate_confirmation_extractions.docs[0]["status"]!="accepted"
 def approved_passport():
  return {"id":"lps_1","tenant_id":TA,"load_id":"L1","version":4,"status":"pickup_authorized","approved_at":"now","approved_by":"U-owner","approved_version":4,"pickup_authorization":{"id":"pua","status":"active"},"blocking_reasons":[],"checkpoints":[{"type":x,"status":"pass","blocking":True} for x in ("load_details","rate_confirmation","broker_identity","shipper_identity","profitability","appointment_feasibility","pickup_instructions")],"load_snapshot":copy.deepcopy(LOAD),"assignment_snapshot":{},"profitability_snapshot":{},"required_checkpoint_types":[]}
+def cleared_party():
+ return {"id":"PVC1","tenant_id":TA,"load_id":"L1","version":2,"status":"cleared","reviews":{x:{"domain":x,"result":"pass"} for x in ("broker_identity","shipper_identity","contact_validation","pickup_instructions","fraud_risk")},"blocking_reasons":[]}
 def resolved_rate_extraction():
  e=extraction("discrepancies_found",fields={**FIELDS,"total_rate":1500}); r=compare_rate_confirmation(e["extracted_fields"],LOAD,"fixed"); d=next(x for x in r["discrepancies"] if x["type"]=="total_rate_mismatch"); e["discrepancies"]=r["discrepancies"]; e["comparison_result"]=r; e["reviewer_resolutions"]=[{"discrepancy_id":d["id"],"discrepancy_type":d["type"],"resolution":"accepted_as_document","decision":"use_document_value","corrected_value":None,"reason":"","resolved_at":"now","resolved_by":"U-owner","resolved_by_role":"owner"}]; return e
 def test_lost_passport_race_prevents_load_and_acceptance(api):
@@ -166,3 +168,32 @@ def test_extraction_acceptance_race_after_load_write_stays_invalidated(api):
  c,db=api; db.rate_confirmation_extractions.docs=[resolved_rate_extraction()]; db.load_passports.docs=[approved_passport()]; db.rate_confirmation_extractions.matched_count_override=0
  r=c.post("/api/rate-confirmation-extractions/rcx_one/accept",json={},headers=h("owner")); assert r.status_code==409
  assert db.loads.docs[0]["rate"]==1500 and db.load_passports.docs[0]["status"]=="review_pending" and db.load_passports.docs[0]["pickup_authorization"]["status"]=="revoked" and db.rate_confirmation_extractions.docs[0]["status"]!="accepted"
+
+def test_supersession_consumes_passport_and_party_impacts(api):
+ c,db=api;db.party_verification_cases=Collection("party_verification_cases",db.events);db.party_verification_cases.docs=[cleared_party()]
+ e=extraction("accepted");e["accepted_snapshot"]={"extracted_fields":{"total_rate":5000}};db.rate_confirmation_extractions.docs=[e];db.load_passports.docs=[approved_passport()]
+ r=c.post("/api/rate-confirmation-extractions/rcx_one/supersede",json={"reason":"same-dollar replacement evidence"},headers=h("owner"))
+ assert r.status_code==200 and r.json()["status"]=="superseded"
+ assert db.load_passports.docs[0]["status"]=="review_pending"
+ assert db.party_verification_cases.docs[0]["status"]=="review_pending"
+ assert db.events.index("load_passports.update")<db.events.index("party_verification_cases.update")<db.events.index("rate_confirmation_extractions.update")
+
+@pytest.mark.parametrize("target",["load_passports","party_verification_cases"])
+def test_supersession_target_race_blocks_parent(api,target):
+ c,db=api;db.party_verification_cases=Collection("party_verification_cases",db.events);db.party_verification_cases.docs=[cleared_party()]
+ db.rate_confirmation_extractions.docs=[extraction("accepted")];db.load_passports.docs=[approved_passport()];getattr(db,target).matched_count_override=0
+ assert c.post("/api/rate-confirmation-extractions/rcx_one/supersede",json={"reason":"replacement"},headers=h("owner")).status_code==409
+ assert db.rate_confirmation_extractions.docs[0]["status"]=="accepted"
+
+def test_supersession_parent_failure_preserves_conservative_impacts(api):
+ c,db=api;db.party_verification_cases=Collection("party_verification_cases",db.events);db.party_verification_cases.docs=[cleared_party()]
+ db.rate_confirmation_extractions.docs=[extraction("accepted")];db.load_passports.docs=[approved_passport()];db.rate_confirmation_extractions.fail_update=True
+ assert c.post("/api/rate-confirmation-extractions/rcx_one/supersede",json={"reason":"replacement"},headers=h("owner")).status_code==500
+ assert db.load_passports.docs[0]["status"]=="review_pending" and db.party_verification_cases.docs[0]["status"]=="review_pending"
+ assert db.rate_confirmation_extractions.docs[0]["status"]=="accepted"
+
+def test_supersession_audit_start_failure_has_no_downstream_effect(api):
+ c,db=api;db.party_verification_cases=Collection("party_verification_cases",db.events);db.party_verification_cases.docs=[cleared_party()]
+ db.rate_confirmation_extractions.docs=[extraction("accepted")];db.load_passports.docs=[approved_passport()];before=(copy.deepcopy(db.load_passports.docs),copy.deepcopy(db.party_verification_cases.docs));db.audit_events.fail_insert=True
+ assert c.post("/api/rate-confirmation-extractions/rcx_one/supersede",json={"reason":"replacement"},headers=h("owner")).status_code==503
+ assert before==(db.load_passports.docs,db.party_verification_cases.docs) and db.rate_confirmation_extractions.docs[0]["status"]=="accepted"

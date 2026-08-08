@@ -33,6 +33,8 @@ from app.pickup_release_invalidation import preinvalidate_pickup_release, preinv
 from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation, is_insurance_document
 from app.execution_invalidation import preinvalidate_for_load, preinvalidate_for_snapshot
 from app.execution_material_change import control_material_load_change
+from app.domain.mutation_impact import MutationType, SourceEntityType, TargetDomain, impact_for, has_impact, plan_mutation
+from app.domain.invoice_authority import InvoiceAuthority, classify_invoice_authority, is_modern_invoice, legacy_write_allowed
 from app.domain.execution_eligibility import DRIVER_MATERIAL_FIELDS, TRUCK_MATERIAL_FIELDS
 from app.schemas import (
     AiChatRequest, AssumptionUpdate, DocumentCreate, DriverAlertRequest, DriverCreate,
@@ -400,21 +402,29 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
     miles, rate = updates.get("miles", load.get("miles", 0)), updates.get("rate", load.get("rate", 0))
     if "miles" in updates or "rate" in updates:
         updates["rpm"] = round(rate / miles, 2) if miles > 0 and rate > 0 else 0
-    material_fields = sorted(set(updates) & MATERIAL_LOAD_FIELDS)
+    proposed = {**load, **updates}
+    impact_plan = plan_mutation(SourceEntityType.LOAD, lid, MutationType.LOAD_UPDATED,
+                                old_state=load, proposed_state=proposed,
+                                relevant_fields=tuple(data.model_fields_set))
+    material_fields = sorted(set(impact_plan.changed_fields) & MATERIAL_LOAD_FIELDS)
     audit = await begin_audit(db.audit_events, user, "load.updated", AuditEntityType.LOAD, lid, changed_fields=list(updates), previous=load)
-    if material_fields: await preinvalidate_pickup_release(db,user,lid,material_fields)
+    readiness_impact=impact_for(impact_plan,TargetDomain.INVOICE_READINESS)
+    if readiness_impact:
+        await invalidate_invoice_readiness(db,user,lid,readiness_impact.reason_code,list(readiness_impact.change_types))
+    if has_impact(impact_plan, TargetDomain.PICKUP_RELEASE): await preinvalidate_pickup_release(db,user,lid,material_fields or impact_plan.unknown_fields)
     passport = None; invalidation_audit = None; invalidation_plan = None
     verification_case = None; verification_audit = None; verification_update = None
     passport_collection = getattr(db, "load_passports", None)
-    if material_fields and passport_collection is not None:
+    if has_impact(impact_plan, TargetDomain.LOAD_PASSPORT) and passport_collection is not None:
         passport = await safe_db(passport_collection.find_one(tenant_filter(user, {"load_id": lid}), {"_id": 0}), "passport lookup")
         if passport:
             invalidation_plan = build_preinvalidation(passport, material_categories(material_fields), user["id"], utc_now())
             if invalidation_plan["required"]:
                 invalidation_audit = await begin_audit(db.audit_events, user, "load_passport.material_change_invalidated", AuditEntityType.LOAD_PASSPORT, passport["id"], changed_fields=material_fields + ["status", "version"], previous=passport)
     case_collection = getattr(db, "party_verification_cases", None)
-    party_fields = {"broker","customer","pickup_address","pickup_city","pickup_state","pickup_zip","pickup_appt","rate_con_number","equipment_type","commodity","weight","driver_id","truck_id"}
-    if set(material_fields) & party_fields and case_collection is not None:
+    party_impact = impact_for(impact_plan, TargetDomain.PARTY_VERIFICATION)
+    party_fields = set(party_impact.change_types) if party_impact else set()
+    if party_impact and case_collection is not None:
         verification_case = await safe_db(case_collection.find_one(tenant_filter(user, {"load_id": lid, "status": "cleared"}), {"_id": 0}), "verification case lookup")
         if verification_case:
             verification_plan = build_case_preinvalidation(verification_case,sorted(set(material_fields)&party_fields),user["id"],utc_now())
@@ -424,14 +434,8 @@ async def update_load(lid: str, data: LoadUpdate, user=Depends(operational_write
                 party_passport_plan=build_passport_preinvalidation(passport,verification_plan["effects"],user["id"],utc_now())
                 invalidation_plan={"required":True,"query":party_passport_plan["query"],"update":party_passport_plan["update"],"new_version":party_passport_plan["update"]["version"]}
                 if not invalidation_audit: invalidation_audit=await begin_audit(db.audit_events,user,"load_passport.material_change_invalidated",AuditEntityType.LOAD_PASSPORT,passport["id"],changed_fields=material_fields+["status","version"],previous=passport)
-    execution_changes=[]
-    if set(updates)&{"driver_id"}: execution_changes.append("driver_assignment")
-    if set(updates)&{"truck_id"}: execution_changes.append("truck_assignment")
-    if set(updates)&{"equipment_type"}: execution_changes.append("equipment")
-    if set(updates)&{"commodity"}: execution_changes.append("commodity")
-    if set(updates)&{"weight"}: execution_changes.append("weight")
-    if set(updates)&{"pickup_address","pickup_city","pickup_state","pickup_zip","pickup_appt","delivery_address","delivery_city","delivery_state","delivery_zip","delivery_appt"}: execution_changes.append("appointment")
-    if set(updates)&{"miles","deadhead_miles","est_drive_hours"}: execution_changes.append("mileage")
+    execution_impact = impact_for(impact_plan, TargetDomain.EXECUTION_ELIGIBILITY)
+    execution_changes=list(execution_impact.change_types) if execution_impact else []
     execution_cases=await preinvalidate_for_load(db,user,lid,execution_changes) if execution_changes else []
     if execution_cases and invalidation_plan:
         passport=await passport_collection.find_one(tenant_filter(user,{"id":passport["id"]}),{"_id":0})
@@ -492,17 +496,22 @@ async def change_stage(lid: str, data: SafeStageChange, user=Depends(operational
     if stage == "Exception": updates["exception_origin_stage"] = old
     if old_stage == LoadStage.EXCEPTION:
         mongo_update["$unset"] = {"exception_origin_stage": ""}
+    # Legacy compatibility statuses are not an independent modern authority.
+    authority=await invoice_authority_for_load(user,lid)
+    modern_managed=authority != InvoiceAuthority.LEGACY
     # Auto-update related statuses
     if stage == "Loaded": updates["bol_status"] = "Received"
     if stage == "Delivered": updates["pod_status"] = "Pending"
-    if stage == "Docs Pending": updates["invoice_status"] = "Docs Pending"
-    if stage == "Invoice Pending": updates["invoice_status"] = "Ready to Invoice"
-    if stage == "Payment Pending": updates["invoice_status"] = "Payment Pending"
-    if stage == "Closed": updates["payment_status"] = "Paid"; updates["invoice_status"] = "Paid"
+    if not modern_managed:
+        if stage == "Docs Pending": updates["invoice_status"] = "Docs Pending"
+        if stage == "Invoice Pending": updates["invoice_status"] = "Ready to Invoice"
+        if stage == "Payment Pending": updates["invoice_status"] = "Payment Pending"
+        if stage == "Closed": updates["payment_status"] = "Paid"; updates["invoice_status"] = "Paid"
     stage_action = "load.exception_entered" if stage == "Exception" else ("load.exception_recovered" if old_stage == LoadStage.EXCEPTION else "load.stage_changed")
     audit = await begin_audit(db.audit_events, user, stage_action, AuditEntityType.LOAD, lid,
                               changed_fields=list(updates), previous=load)
-    if old == "Delivered" and stage != "Delivered":
+    impact_plan = plan_mutation(SourceEntityType.LOAD,lid,MutationType.LOAD_STAGE_CHANGED,old_state={"stage":old},proposed_state={"stage":stage},relevant_fields=["stage"])
+    if has_impact(impact_plan,TargetDomain.INVOICE_READINESS):
         await invalidate_invoice_readiness(db,user,lid,"delivery_basis_changed",["load_stage"])
     transition_query = tenant_filter(user, {"id": lid, "stage": old})
     if old_stage == LoadStage.EXCEPTION:
@@ -584,10 +593,16 @@ async def list_docs(load_id: Optional[str] = None, user=Depends(get_current_user
 async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
     await require_tenant_reference(db.loads, user, d.load_id, "load")
     doc = tenant_document(user, {"id": new_id("DOC"), **d.model_dump(mode="json"), "uploaded_at": now_iso(), "uploaded_by": user.get("name", user["id"])})
+    impact_plan=plan_mutation(SourceEntityType.DOCUMENT,doc["id"],MutationType.DOCUMENT_ADDED,context={"document_type":d.doc_type.value})
+    audit = await begin_audit(db.audit_events, user, "document.created", AuditEntityType.DOCUMENT, doc["id"], changed_fields=list(d.model_fields_set), previous={"load_id": d.load_id})
+    pickup_impact=impact_for(impact_plan,TargetDomain.PICKUP_RELEASE)
+    if pickup_impact:
+        await preinvalidate_pickup_release(db,user,d.load_id,list(pickup_impact.change_types))
     passport_collection = getattr(db, "load_passports", None)
     passport = None; invalidation_audit = None; invalidation_plan = None
     verification_case = None; verification_plan = None; verification_audit = None
-    relevant_change = "rate_confirmation" if d.doc_type.value == "rate_con" else ("insurance_evidence" if is_insurance_document(doc) else None)
+    party_impact=impact_for(impact_plan,TargetDomain.PARTY_VERIFICATION)
+    relevant_change=(party_impact.change_types[0] if party_impact else None)
     case_collection=getattr(db,"party_verification_cases",None)
     if relevant_change and case_collection is not None:
         verification_case = await case_collection.find_one(tenant_filter(user,{"load_id":d.load_id,"status":"cleared"}),{"_id":0})
@@ -602,10 +617,10 @@ async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
                 pp=build_passport_preinvalidation(passport,verification_plan["effects"],user["id"],utc_now()); invalidation_plan={"required":True,"query":pp["query"],"update":pp["update"],"new_version":pp["update"]["version"]}
             if invalidation_plan["required"]:
                 invalidation_audit = await begin_audit(db.audit_events, user, "load_passport.material_change_invalidated", AuditEntityType.LOAD_PASSPORT, passport["id"], changed_fields=["rate_confirmation", "status", "version"], previous=passport)
-    audit = await begin_audit(db.audit_events, user, "document.created", AuditEntityType.DOCUMENT, doc["id"], changed_fields=list(d.model_fields_set), previous={"load_id": d.load_id})
-    if d.doc_type.value in BILLING_DOCUMENT_TYPES:
+    if has_impact(impact_plan,TargetDomain.INVOICE_READINESS):
         await invalidate_invoice_readiness(db,user,d.load_id,"billing_document_changed",[d.doc_type.value])
-    execution_cases=await preinvalidate_for_load(db,user,d.load_id,["rate_confirmation" if relevant_change=="rate_confirmation" else "party_verification"]) if relevant_change else []
+    execution_impact=impact_for(impact_plan,TargetDomain.EXECUTION_ELIGIBILITY)
+    execution_cases=await preinvalidate_for_load(db,user,d.load_id,list(execution_impact.change_types)) if execution_impact else []
     if execution_cases and passport:
         passport=await passport_collection.find_one(tenant_filter(user,{"id":passport["id"]}),{"_id":0})
         if verification_plan:
@@ -633,6 +648,25 @@ async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
     return doc
 
 # ============ INVOICES ============
+MODERN_LIFECYCLE_COLLECTIONS=("load_passports","execution_eligibility_cases","pickup_release_cases","execution_sessions")
+
+async def invoice_authority_for_load(user,load_id,invoices=None):
+    """Resolve bounded, tenant-scoped evidence for the modern billing boundary."""
+    if invoices is None:
+        invoice_collection=getattr(db,"invoices",None)
+        invoices=await invoice_collection.find(tenant_filter(user,{"load_id":load_id})).to_list(50) if invoice_collection is not None else []
+    readiness_collection=getattr(db,"invoice_readiness_cases",None)
+    readiness=([await readiness_collection.find_one(tenant_filter(user,{"load_id":load_id}),{"_id":0})]
+               if readiness_collection is not None else [])
+    readiness=[item for item in readiness if item]
+    lifecycle=[]
+    for name in MODERN_LIFECYCLE_COLLECTIONS:
+        collection=getattr(db,name,None)
+        if collection is not None:
+            item=await collection.find_one(tenant_filter(user,{"load_id":load_id}),{"_id":0})
+            if item:lifecycle.append({"domain":name,"id":item.get("id")})
+    return classify_invoice_authority(invoices,readiness,lifecycle)
+
 class InternalSeedInvoice(BaseModel):
     id: str = Field(default_factory=lambda: new_id("INV"))
     load_id: str
@@ -654,6 +688,11 @@ async def create_invoice(inv: InvoiceCreate, user=Depends(finance_write)):
     await require_tenant_reference(db.loads, user, inv.load_id, "load")
     doc = tenant_document(user, {"id": new_id("INV"), **inv.model_dump(mode="json"), "created_at": now_iso()})
     audit = await begin_audit(db.audit_events, user, "invoice.created", AuditEntityType.INVOICE, doc["id"], changed_fields=list(inv.model_fields_set))
+    existing=await db.invoices.find(tenant_filter(user,{"load_id":inv.load_id})).to_list(50)
+    authority=await invoice_authority_for_load(user,inv.load_id,existing)
+    if not legacy_write_allowed(authority):
+        await audit.rejected("canonical_invoice_authority_required")
+        raise HTTPException(409,"Modern or ambiguous invoice authority requires the Invoice Readiness package workflow")
     await audited_db(audit, db.invoices.insert_one(doc), "invoice create"); clean_doc(doc); await audit.succeeded(doc)
     return doc
 
@@ -663,6 +702,15 @@ async def update_invoice(iid: str, data: InvoiceUpdate, user=Depends(finance_wri
     if not previous: raise HTTPException(404, "Not found")
     updates = data.model_dump(mode="json", exclude_unset=True); updates["updated_at"] = now_iso()
     audit = await begin_audit(db.audit_events, user, "invoice.updated", AuditEntityType.INVOICE, iid, changed_fields=list(updates), previous=previous)
+    if is_modern_invoice(previous):
+        await audit.rejected("canonical_invoice_immutable_on_legacy_route")
+        raise HTTPException(409,"Modern invoice amount and status are controlled by the Invoice Readiness workflow")
+    if previous.get("load_id"):
+        siblings=await db.invoices.find(tenant_filter(user,{"load_id":previous["load_id"]})).to_list(50)
+        authority=await invoice_authority_for_load(user,previous["load_id"],siblings)
+        if authority != InvoiceAuthority.LEGACY:
+            await audit.rejected("nonlegacy_invoice_authority")
+            raise HTTPException(409,"Modern, incomplete, or ambiguous invoice authority requires reconciliation")
     result = await audited_db(audit, db.invoices.update_one(tenant_filter(user, {"id": iid}), {"$set": updates}), "invoice update")
     if not result.matched_count: await audit.rejected("not_found"); raise HTTPException(404, "Not found")
     await audit.succeeded(updates)

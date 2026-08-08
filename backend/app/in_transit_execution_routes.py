@@ -7,6 +7,7 @@ from app.schemas.in_transit_execution import *
 from app.tenant import tenant_document,tenant_filter,require_tenant_id
 from app.domain.in_transit_execution import TRANSITIONS,TERMINAL,eta_evaluation,delay_evaluation,detention_minutes,execution_health,completion_readiness,select_current_pickup_release,owner_role_allowed
 from app.invoice_readiness_invalidation import invalidate_invoice_readiness
+from app.domain.mutation_impact import MutationType,SourceEntityType,TargetDomain,has_impact,plan_mutation
 
 ADMIN={"owner","admin"}; OPS=ADMIN|{"operations","dispatcher"}; REVIEW=OPS|{"safety","compliance"}
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -239,5 +240,6 @@ def register_in_transit_execution_routes(api,db,get_current_user):
   if data.truck_id is not None:new["truck_id"]=data.truck_id
   history=s.get("planning_history",[])+[{"version":s["version"],"snapshot":old,"amended_at":now(),"amended_by":user["id"],"reason":data.reason}]
   a=await begin_audit(db.audit_events,user,"execution_session.plan_amended",AuditEntityType.EXECUTION_SESSION,sid,changed_fields=["planned_snapshot","planning_history","version"],previous=s)
-  if s.get("status") in {"delivery_confirmed","completed"}:await invalidate_invoice_readiness(db,user,s["load_id"],"delivery_basis_changed",["plan_amended"])
+  impact_plan=plan_mutation(SourceEntityType.EXECUTION_SESSION,sid,MutationType.EXECUTION_PLAN_AMENDED)
+  if s.get("status") in {"delivery_confirmed","completed"} and has_impact(impact_plan,TargetDomain.INVOICE_READINESS):await invalidate_invoice_readiness(db,user,s["load_id"],"delivery_basis_changed",["plan_amended"])
   await append_event(db,user,s,"plan_amended","Execution plan amended; prior plan preserved",{"reason":data.reason});return await save(db,user,s,{"planned_snapshot":new,"planning_history":history},a)

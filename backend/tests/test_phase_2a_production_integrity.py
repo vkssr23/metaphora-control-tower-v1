@@ -196,6 +196,13 @@ def test_legacy_and_modern_invoice_authority_conflict():
     data=modern_chain(); data["invoices"].append({"id":"LEG","tenant_id":TA,"load_id":"L1","status":"Ready to Invoice"})
     assert "LEGACY_MODERN_INVOICE_AUTHORITY_CONFLICT" in codes(scan_integrity(data))
 
+def test_partial_modern_invoice_binding_is_not_healthy_legacy():
+    for binding in ({"readiness_case_id":"R"},{"package_id":"P"}):
+        data=base();data["invoices"]=[{"id":"I","tenant_id":TA,"load_id":"L1",**binding}]
+        result=set(codes(scan_integrity(data)))
+        assert "MODERN_INVOICE_AUTHORITY_INCOMPLETE" in result
+        assert "LEGACY_INVOICE_AUTHORITY" not in result
+
 def test_delivery_modern_and_legacy_classification():
     data=base(); data["loads"][0]["stage"]="Delivered"
     result=set(codes(scan_integrity(data))); assert "LEGACY_DELIVERY_EVIDENCE_UNVERIFIABLE" in result and "MODERN_DELIVERY_EVIDENCE_MISSING" not in result

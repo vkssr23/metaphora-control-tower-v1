@@ -215,7 +215,7 @@ def test_safety_roles_cannot_write_operational_or_finance(role):
 def test_finance_cannot_write_operational_or_safety():
     as_role("finance")
     client = TestClient(server.app)
-    assert client.post("/api/invoices", json={"load_id": "L1"}).status_code == 200
+    assert client.post("/api/invoices", json={"load_id": "L1"}).status_code == 409
     assert client.post("/api/loads", json={}).status_code == 403
     assert client.post("/api/trucks", json={"truck_number": "T1"}).status_code == 403
 
