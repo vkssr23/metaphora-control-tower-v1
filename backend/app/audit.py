@@ -52,9 +52,10 @@ class AuditOperation:
 
 async def begin_audit(collection: Any, user: Mapping[str, Any], action: str,
                       entity_type: AuditEntityType, entity_id: str, *, changed_fields=None,
-                      previous=None, source: AuditSource = AuditSource.API) -> AuditOperation:
+                      previous=None, source: AuditSource = AuditSource.API,
+                      operation_id: str | None = None) -> AuditOperation:
     operation = AuditOperation(collection, user, action, entity_type, entity_id,
-                               list(changed_fields or []), previous, source, new_operation_id())
+                               list(changed_fields or []), previous, source, operation_id or new_operation_id())
     try:
         await operation._append(AuditPhase.STARTED)
     except Exception:

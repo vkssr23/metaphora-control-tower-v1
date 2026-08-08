@@ -11,9 +11,9 @@ from app.infrastructure.index_manifest import expected_indexes
 from app.tenant import TENANT_ID_PATTERN
 
 SEVERITIES=("critical","high","medium","low","info")
-TENANT_SCOPED=frozenset({"users","loads","drivers","trucks","documents","audit_events","load_passports","rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions","execution_events","execution_exceptions","invoice_readiness_cases","invoice_packages","invoices","assumptions"})
+TENANT_SCOPED=frozenset({"users","loads","drivers","trucks","documents","audit_events","load_passports","rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions","execution_events","execution_exceptions","invoice_readiness_cases","invoice_packages","invoices","assumptions","operations","outbox_events","reconciliation_items"})
 SUPPORTED_DOCUMENT_TYPES=frozenset({"rate_con","bol","pod","lumper","scale","invoice","other","insurance"})
-REQUIRED_VERSION=frozenset({"load_passports","rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions","execution_exceptions","invoice_readiness_cases"})
+REQUIRED_VERSION=frozenset({"load_passports","rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions","execution_exceptions","invoice_readiness_cases","operations","outbox_events","reconciliation_items"})
 PARENTS={
  "documents":(("load_id","loads"),), "load_passports":(("load_id","loads"),),
  "rate_confirmation_extractions":(("load_id","loads"),("document_id","documents")),
@@ -25,6 +25,7 @@ PARENTS={
  "invoice_readiness_cases":(("load_id","loads"),("execution_session_id","execution_sessions")),
  "invoice_packages":(("readiness_case_id","invoice_readiness_cases"),),
  "invoices":(("load_id","loads"),("readiness_case_id","invoice_readiness_cases"),("package_id","invoice_packages")),
+ "outbox_events":(("operation_id","operations"),), "reconciliation_items":(("operation_id","operations"),),
 }
 
 @dataclass(frozen=True)
@@ -42,6 +43,9 @@ def _matches(doc, predicate):
     for key,expected in (predicate or {}).items():
         if isinstance(expected,dict) and "$in" in expected and doc.get(key) not in expected["$in"]: return False
         if isinstance(expected,dict) and "$exists" in expected and (key in doc)!=expected["$exists"]: return False
+        if isinstance(expected,dict) and "$type" in expected:
+            expected_type=expected["$type"]
+            if expected_type=="string" and not isinstance(doc.get(key),str):return False
         if not isinstance(expected,dict) and doc.get(key)!=expected:return False
     return True
 
@@ -153,6 +157,26 @@ def scan_integrity(records: Mapping[str,Sequence[Mapping[str,Any]]], *, environm
     for tenant_load in {(x.get("tenant_id"),x.get("load_id")) for x in invoices}:
         same=[x for x in invoices if (x.get("tenant_id"),x.get("load_id"))==tenant_load]
         if any(x.get("readiness_case_id") for x in same) and any(not x.get("readiness_case_id") for x in same):add(_finding("LEGACY_MODERN_INVOICE_AUTHORITY_CONFLICT","critical","invoices","Load has both legacy and modern invoice authority",same[0],len(same),"Resolve canonical invoice authority in Phase 2C"))
+    operations=records.get("operations",()); outbox=records.get("outbox_events",()); reconciliations=records.get("reconciliation_items",())
+    operation_ids={(x.get("tenant_id"),x.get("id")) for x in operations}
+    reconciliation_operations={(x.get("tenant_id"),x.get("operation_id")) for x in reconciliations if x.get("status") in {"open","acknowledged"}}
+    outbox_operations={(x.get("tenant_id"),x.get("operation_id")) for x in outbox}
+    for operation in operations:
+        identity=(operation.get("tenant_id"),operation.get("id"))
+        if operation.get("status") in {"partial","reconciliation_required"} and identity not in reconciliation_operations:add(_finding("OPERATION_RECONCILIATION_MISSING","critical","operations","Partial operation lacks an open reconciliation item",operation))
+        if operation.get("status")=="succeeded" and operation.get("operation_type")=="invoice.create" and identity not in outbox_operations:add(_finding("SUCCEEDED_OPERATION_OUTBOX_MISSING","critical","operations","Successful invoice operation lacks its required outbox event",operation))
+        if operation.get("status")=="committing" and operation.get("operation_type")=="invoice.create" and identity in outbox_operations:
+            related_events=[x for x in outbox if x.get("tenant_id")==operation.get("tenant_id") and x.get("operation_id")==operation.get("id") and x.get("event_type")=="invoice.ready_for_submission"]
+            invoice_ids={x.get("id") for x in invoices if x.get("tenant_id")==operation.get("tenant_id")}
+            package_ids={x.get("id") for x in packages if x.get("tenant_id")==operation.get("tenant_id")}
+            proven=any((event.get("payload") or {}).get("invoice_id") in invoice_ids and (event.get("payload") or {}).get("package_id") in package_ids for event in related_events)
+            if proven:add(_finding("OPERATION_STRANDED_AFTER_OUTBOX","critical","operations","Invoice operation remains committing after invoice, package, and outbox became durable",operation))
+    for event in outbox:
+        if (event.get("tenant_id"),event.get("operation_id")) not in operation_ids:add(_finding("OUTBOX_OPERATION_MISSING","critical","outbox_events","Outbox event references a missing operation",event))
+        if event.get("status")=="dead_letter":add(_finding("OUTBOX_DEAD_LETTERED","high","outbox_events","Outbox event exhausted delivery policy",event))
+        if event.get("status")=="processing" and event.get("claim_expires_at") and event.get("claim_expires_at") < (generated_at or datetime.now(timezone.utc).isoformat()):add(_finding("OUTBOX_LEASE_EXPIRED","high","outbox_events","Outbox processing lease is expired",event))
+    for item in reconciliations:
+        if (item.get("tenant_id"),item.get("operation_id")) not in operation_ids:add(_finding("RECONCILIATION_OPERATION_MISSING","critical","reconciliation_items","Reconciliation item references a missing operation",item))
     findings.sort(key=lambda x:(SEVERITIES.index(x.severity),x.code,x.collection,x.tenant_id or "",x.entity_id or ""))
     counts=Counter(x.severity for x in findings); total=sum(len(v) for v in records.values())
     timestamp=generated_at or datetime.now(timezone.utc).isoformat()
@@ -187,7 +211,8 @@ def evaluate_environment(config: Mapping[str,Any]):
         reachable=cap["reachable_by_default"] if gate is None else str(config.get(gate,"false")).lower() in {"1","true","yes","on"}
         capabilities.append({**cap,"reachable":reachable,"pilot_impact":"blocks_pilot" if reachable and cap["classification"]=="pilot_blocker" else "explicit_demo_behavior"})
         if prod and reachable and cap["classification"]=="pilot_blocker":item("SIMULATED_CAPABILITY_REACHABLE","unsafe",f'{cap["id"]} simulation is reachable at {cap["source"]}',"critical")
-    return {"environment":env or "unknown","settings":findings,"simulated_capabilities":capabilities}
+    return {"environment":env or "unknown","settings":findings,"simulated_capabilities":capabilities,
+            "transaction_capability":"unverified","transaction_mode":"durable_saga"}
 
 def evaluate_production_readiness(environment_report, integrity_report=None, index_report=None):
     critical=sum(x["severity"]=="critical" and x["state"] in {"missing","unsafe"} for x in environment_report["settings"])
