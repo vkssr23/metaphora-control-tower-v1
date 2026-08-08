@@ -63,6 +63,9 @@ def prepare(db,status="pickup_authorized"):
     db.loads.docs=[{"id":"L1","tenant_id":TENANT,"rate":1000,"miles":100,"stage":"Assigned","driver_id":"D1","truck_id":"T1","pickup_address":"A","delivery_address":"B"}]
     db.load_passports.docs=[approved(status)]
 
+def readiness(status="approved"):
+    return {"id":"IRC1","tenant_id":TENANT,"load_id":"L1","version":3,"status":status,"verdict":"ready","invoice_creation_state":"none","readiness_items":[],"findings":[],"basis_history":[],"calculation_snapshot":{"billable_total":"1000.00"},"financial_basis_fingerprint":"old","approved_at":"now","approved_by":"U-owner"}
+
 def test_material_load_race_blocks_canonical_write(api):
     client,db=api; prepare(db); before=copy.deepcopy(db.loads.docs[0]); db.load_passports.matched_count_override=0
     response=client.put("/api/loads/L1",json={"rate":1200})
@@ -73,6 +76,32 @@ def test_successful_material_load_preinvalidates_then_writes(api):
     assert response.status_code==200 and db.events.index("load_passports.update") < db.events.index("loads.update")
     p=db.load_passports.docs[0]; assert p["status"]=="review_pending" and p["version"]==5 and p["pickup_authorization"]["status"]=="revoked" and "material_change_requires_reapproval" in p["blocking_reasons"]
     assert next(c for c in p["checkpoints"] if c["type"]=="profitability")["status"]=="pending" and db.loads.docs[0]["rate"]==1200
+
+@pytest.mark.parametrize("field,value",[("rate",1200),("rate_con_number","RC2")])
+def test_load_billing_change_reopens_readiness_before_parent(api,field,value):
+    client,db=api;prepare(db);db.invoice_readiness_cases=Collection("invoice_readiness_cases",db.events,[readiness()])
+    response=client.put("/api/loads/L1",json={field:value})
+    assert response.status_code==200
+    case=db.invoice_readiness_cases.docs[0]
+    assert case["status"]=="reopened" and case["version"]==4
+    assert db.events.index("invoice_readiness_cases.update")<db.events.index("loads.update")
+
+def test_invoiced_readiness_blocks_load_billing_change(api):
+    client,db=api;prepare(db);db.invoice_readiness_cases=Collection("invoice_readiness_cases",db.events,[readiness("invoiced")])
+    before=copy.deepcopy(db.loads.docs[0]);response=client.put("/api/loads/L1",json={"rate":1200})
+    assert response.status_code==409 and db.loads.docs[0]==before
+
+def test_readiness_race_blocks_load_and_parent_failure_preserves_reopen(api):
+    client,db=api;prepare(db);db.invoice_readiness_cases=Collection("invoice_readiness_cases",db.events,[readiness()]);db.invoice_readiness_cases.matched_count_override=0
+    assert client.put("/api/loads/L1",json={"rate":1200}).status_code==409 and db.loads.update_calls==0
+    prepare(db);db.invoice_readiness_cases=Collection("invoice_readiness_cases",db.events,[readiness()]);db.loads.fail_update=True
+    assert client.put("/api/loads/L1",json={"rate":1200}).status_code==500
+    assert db.invoice_readiness_cases.docs[0]["status"]=="reopened"
+
+def test_load_audit_start_failure_prevents_readiness_and_parent_mutation(api):
+    client,db=api;prepare(db);db.invoice_readiness_cases=Collection("invoice_readiness_cases",db.events,[readiness()]);before=copy.deepcopy(db.invoice_readiness_cases.docs);db.audit_events.fail_insert=True
+    assert client.put("/api/loads/L1",json={"rate":1200}).status_code==503
+    assert db.invoice_readiness_cases.docs==before and db.loads.update_calls==0
 def test_load_failure_after_invalidation_never_restores_approval(api):
     client,db=api; prepare(db); db.loads.fail_update=True; response=client.put("/api/loads/L1",json={"rate":1200})
     assert response.status_code==500; p=db.load_passports.docs[0]; assert p["status"]=="review_pending" and p["pickup_authorization"]["status"]=="revoked" and p["approved_at"] is None
@@ -84,6 +113,32 @@ def test_rate_confirmation_preinvalidates_before_insert(api):
     client,db=api; prepare(db); response=client.post("/api/documents",json={"load_id":"L1","doc_type":"rate_con","filename":"rate.pdf","url":"mock://rate.pdf"})
     assert response.status_code==200 and db.events.index("load_passports.update") < db.events.index("documents.insert")
     p=db.load_passports.docs[0]; assert p["status"]=="review_pending" and p["pickup_authorization"]["status"]=="revoked"
+
+@pytest.mark.parametrize("doc_type",["rate_con","insurance"])
+def test_prerequisite_document_executes_pickup_impact(api,doc_type):
+    client,db=api;prepare(db);db.pickup_release_cases=Collection("pickup_release_cases",db.events,[{"id":"PR1","load_id":"L1","passport_id":"lps_x","version":2,"status":"release_ready","verdict":"ready","custody_state":"not_authorized","blocking_reasons":[]}])
+    response=client.post("/api/documents",json={"load_id":"L1","doc_type":doc_type,"filename":"evidence.pdf","url":"mock://evidence.pdf"})
+    assert response.status_code==200
+    assert db.pickup_release_cases.docs[0]["status"]=="review_pending"
+    assert db.events.index("pickup_release_cases.update")<db.events.index("documents.insert")
+
+@pytest.mark.parametrize("doc_type",["pod","scale"])
+def test_non_prerequisite_document_does_not_touch_pickup(api,doc_type):
+    client,db=api;prepare(db);db.pickup_release_cases=Collection("pickup_release_cases",db.events,[{"id":"PR1","load_id":"L1","version":2,"status":"release_ready"}])
+    assert client.post("/api/documents",json={"load_id":"L1","doc_type":doc_type,"filename":"evidence.pdf","url":"mock://evidence.pdf"}).status_code==200
+    assert db.pickup_release_cases.update_calls==0
+
+def test_pickup_race_blocks_document_and_insert_failure_preserves_conservative_state(api):
+    client,db=api;prepare(db);case={"id":"PR1","load_id":"L1","passport_id":"lps_x","version":2,"status":"release_ready","verdict":"ready","custody_state":"not_authorized","blocking_reasons":[]};db.pickup_release_cases=Collection("pickup_release_cases",db.events,[case]);db.pickup_release_cases.matched_count_override=0
+    assert client.post("/api/documents",json={"load_id":"L1","doc_type":"insurance","filename":"i.pdf","url":"mock://i.pdf"}).status_code==409 and db.documents.insert_calls==0
+    db.pickup_release_cases=Collection("pickup_release_cases",db.events,[case]);db.documents.fail_insert=True
+    assert client.post("/api/documents",json={"load_id":"L1","doc_type":"insurance","filename":"i.pdf","url":"mock://i.pdf"}).status_code==500
+    assert db.pickup_release_cases.docs[0]["status"]=="review_pending"
+
+def test_document_audit_start_failure_prevents_pickup_and_insert(api):
+    client,db=api;prepare(db);case={"id":"PR1","load_id":"L1","passport_id":"lps_x","version":2,"status":"release_ready","verdict":"ready","custody_state":"not_authorized","blocking_reasons":[]};db.pickup_release_cases=Collection("pickup_release_cases",db.events,[case]);db.audit_events.fail_insert=True
+    assert client.post("/api/documents",json={"load_id":"L1","doc_type":"insurance","filename":"i.pdf","url":"mock://i.pdf"}).status_code==503
+    assert db.pickup_release_cases.update_calls==0 and db.documents.insert_calls==0
 def test_document_failure_after_invalidation_is_conservative(api):
     client,db=api; prepare(db); db.documents.fail_insert=True
     response=client.post("/api/documents",json={"load_id":"L1","doc_type":"rate_con","filename":"rate.pdf","url":"mock://rate.pdf"})

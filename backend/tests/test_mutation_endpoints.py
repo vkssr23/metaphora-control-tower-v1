@@ -95,7 +95,26 @@ def test_create_response_contracts_and_server_actors(api):
     assert doc.status_code==200 and doc.json()["uploaded_by"]=="Authenticated Actor" and "uploaded_at" in doc.json()
     role("finance")
     invoice=client.post("/api/invoices", json={"load_id":load.json()["id"]})
-    assert invoice.status_code==200 and set(("id","created_at")) <= set(invoice.json())
+    assert invoice.status_code==409 and not db.invoices.docs
+
+@pytest.mark.parametrize("collection",["load_passports","execution_eligibility_cases","pickup_release_cases","execution_sessions","invoice_readiness_cases"])
+def test_modern_lifecycle_evidence_rejects_legacy_invoice_create(api,collection):
+    client,db,role=api;role("finance");db.loads.docs=[{"id":"L1","stage":"Assigned"}]
+    setattr(db,collection,Collection([{"id":"X1","load_id":"L1"}]))
+    assert client.post("/api/invoices",json={"load_id":"L1","amount":999}).status_code==409
+    assert not db.invoices.docs
+
+def test_delivered_without_readiness_is_not_assumed_legacy(api):
+    client,db,role=api;role("finance");db.loads.docs=[{"id":"L1","stage":"Delivered"}]
+    assert client.post("/api/invoices",json={"load_id":"L1","amount":999}).status_code==409
+
+def test_historical_legacy_invoice_compatibility_and_malformed_modern_block(api):
+    client,db,role=api;role("finance");db.loads.docs=[{"id":"L1"}]
+    db.invoices.docs=[{"id":"OLD","load_id":"L1","amount":10,"status":"Not Ready","tenant_id":VALID_TENANT}]
+    assert client.put("/api/invoices/OLD",json={"amount":11}).status_code==200
+    db.invoices.docs=[{"id":"BAD","load_id":"L1","amount":10,"readiness_case_id":"R1","tenant_id":VALID_TENANT}]
+    assert client.put("/api/invoices/BAD",json={"amount":12}).status_code==409
+    assert db.invoices.docs[0]["amount"]==10
 
 @pytest.mark.parametrize("field,value,old,expected", [("rate",500, {"rate":1000,"miles":100,"rpm":10},5), ("miles",200,{"rate":1000,"miles":100,"rpm":10},5), ("rate",0,{"rate":1000,"miles":100,"rpm":10},0), ("miles",0,{"rate":1000,"miles":100,"rpm":10},0)])
 def test_load_updates_never_leave_stale_rpm(api, field, value, old, expected):

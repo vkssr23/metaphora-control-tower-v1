@@ -7,6 +7,7 @@ from app.schemas.invoice_readiness import *
 from app.tenant import tenant_document,tenant_filter,require_tenant_id
 from app.domain.invoice_readiness import evaluate,canonical_hash,evidence_ok,select_current_rate,basis_fingerprint,invalidation_plan
 from app.invoice_readiness_invalidation import invalidate_invoice_readiness
+from app.domain.mutation_impact import MutationType,SourceEntityType,TargetDomain,has_impact,plan_mutation
 from app.infrastructure.operations import OperationConflict,create_or_replay,idempotency_identity,transition
 from app.infrastructure.outbox import enqueue
 from app.infrastructure.reconciliation import ensure_reconciliation
@@ -56,6 +57,8 @@ async def mutate(db,user,case,data,action,updates,entity=AuditEntityType.INVOICE
  if not r.matched_count:await audit.rejected("version_conflict");raise HTTPException(409,"Invoice readiness case changed concurrently")
  await audit.succeeded({"id":case["id"],"version":updates["version"],"status":updates.get("status",case["status"])});return await one(db.invoice_readiness_cases,user,case["id"],"Invoice readiness case")
 def material_reset(case,reason,user):
+ impact_plan=plan_mutation(SourceEntityType.INVOICE_READINESS,case["id"],MutationType.INVOICE_READINESS_FINANCIAL_BASIS_CHANGED)
+ if not has_impact(impact_plan,TargetDomain.INVOICE_READINESS):return {}
  try:plan=invalidation_plan(case,reason,["accessorial"],now(),user["id"])
  except ValueError:raise HTTPException(409,"Invoice creation or issued invoice blocks accessorial mutation")
  if not plan:return {"status":"draft","verdict":"pending"}

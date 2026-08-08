@@ -143,7 +143,9 @@ def scan_integrity(records: Mapping[str,Sequence[Mapping[str,Any]]], *, environm
             if len(comparable)>=2 and len(set(comparable))>1:add(_finding("FINANCIAL_BASIS_FINGERPRINT_MISMATCH","critical","invoice_readiness_cases","Comparable Phase 1G financial basis fingerprints disagree",case))
             elif len(comparable)<3:add(_finding("FINANCIAL_BASIS_NOT_COMPARABLE","medium","invoice_readiness_cases","One or more modern authority records lacks a comparable financial basis fingerprint",case))
     for inv in invoices:
-        if not inv.get("readiness_case_id"):add(_finding("LEGACY_INVOICE_AUTHORITY","high","invoices","Invoice lacks Phase 1G readiness authority",inv))
+        readiness_binding=bool(inv.get("readiness_case_id"));package_binding=bool(inv.get("package_id"))
+        if readiness_binding != package_binding:add(_finding("MODERN_INVOICE_AUTHORITY_INCOMPLETE","critical","invoices","Invoice has an incomplete Phase 1G readiness/package binding and must not be treated as legacy",inv))
+        elif not readiness_binding:add(_finding("LEGACY_INVOICE_AUTHORITY","high","invoices","Invoice lacks Phase 1G readiness authority",inv))
         else:
             case=readiness_by_id.get(inv.get("readiness_case_id"))
             if not case:add(_finding("INVOICE_READINESS_MISSING","critical","invoices","Modern invoice readiness_case_id does not resolve",inv))

@@ -11,6 +11,7 @@ from app.domain.party_verification import build_case_preinvalidation, build_pass
 from app.execution_invalidation import preinvalidate_for_load
 from app.invoice_readiness_invalidation import invalidate_invoice_readiness
 from app.pickup_release_invalidation import preinvalidate_pickup_release
+from app.domain.mutation_impact import MutationType,SourceEntityType,TargetDomain,has_impact,impact_for,plan_mutation
 
 ADMIN={"owner","admin"}; OPS=ADMIN|{"operations","dispatcher"}; FINANCE=ADMIN|{"finance"}
 def _role(user,roles):
@@ -152,8 +153,11 @@ def register_rate_confirmation_routes(api,db,get_current_user):
             if not r or not lf or r["decision"]=="keep_load_value": continue
             value=r.get("corrected_value") if r["decision"]=="corrected_value" else d["document_value"]
             updates[lf]=value; selected.append(lf)
-        material=sorted(set(selected)); audit=await begin_audit(db.audit_events,user,"rate_confirmation.accepted",AuditEntityType.RATE_CONFIRMATION_EXTRACTION,eid,changed_fields=["status","version"]+material,previous=e); await invalidate_invoice_readiness(db,user,e["load_id"],"rate_confirmation_changed",["acceptance",eid]); await preinvalidate_pickup_release(db,user,e["load_id"],["rate_confirmation"]); passport=await db.load_passports.find_one(tenant_filter(user,{"load_id":e["load_id"]}),{"_id":0}); invalidation=None
-        execution_cases=await preinvalidate_for_load(db,user,e["load_id"],["rate_confirmation"])
+        material=sorted(set(selected)); impact_plan=plan_mutation(SourceEntityType.RATE_CONFIRMATION,eid,MutationType.RATE_CONFIRMATION_ACCEPTED); audit=await begin_audit(db.audit_events,user,"rate_confirmation.accepted",AuditEntityType.RATE_CONFIRMATION_EXTRACTION,eid,changed_fields=["status","version"]+material,previous=e)
+        if has_impact(impact_plan,TargetDomain.INVOICE_READINESS): await invalidate_invoice_readiness(db,user,e["load_id"],"rate_confirmation_changed",["acceptance",eid])
+        if has_impact(impact_plan,TargetDomain.PICKUP_RELEASE): await preinvalidate_pickup_release(db,user,e["load_id"],["rate_confirmation"])
+        passport=await db.load_passports.find_one(tenant_filter(user,{"load_id":e["load_id"]}),{"_id":0}); invalidation=None
+        execution_impact=impact_for(impact_plan,TargetDomain.EXECUTION_ELIGIBILITY); execution_cases=await preinvalidate_for_load(db,user,e["load_id"],list(execution_impact.change_types)) if execution_impact else []
         if execution_cases: passport=await db.load_passports.find_one(tenant_filter(user,{"load_id":e["load_id"]}),{"_id":0})
         case_collection=getattr(db,"party_verification_cases",None); verification_case=None; verification_plan=None
         if case_collection is not None:
@@ -194,8 +198,29 @@ def register_rate_confirmation_routes(api,db,get_current_user):
     async def supersede(eid:str,data:SupersedeAction,user=Depends(get_current_user)):
         _role(user,ADMIN); e=await _one(db,user,eid)
         if e["status"]!="accepted": raise HTTPException(409,"Only accepted extraction may be superseded")
+        impact_plan=plan_mutation(SourceEntityType.RATE_CONFIRMATION,eid,MutationType.RATE_CONFIRMATION_SUPERSEDED)
         audit=await begin_audit(db.audit_events,user,"rate_confirmation.superseded",AuditEntityType.RATE_CONFIRMATION_EXTRACTION,eid,changed_fields=["status","version"],previous=e)
-        await invalidate_invoice_readiness(db,user,e["load_id"],"rate_confirmation_changed",["supersession",eid])
-        await preinvalidate_pickup_release(db,user,e["load_id"],["rate_confirmation"])
-        await preinvalidate_for_load(db,user,e["load_id"],["rate_confirmation"])
+        if has_impact(impact_plan,TargetDomain.PICKUP_RELEASE):await preinvalidate_pickup_release(db,user,e["load_id"],["rate_confirmation"])
+        passport=await db.load_passports.find_one(tenant_filter(user,{"load_id":e["load_id"]}),{"_id":0}) if has_impact(impact_plan,TargetDomain.LOAD_PASSPORT) else None
+        case_collection=getattr(db,"party_verification_cases",None);verification_case=None;verification_plan=None
+        if case_collection is not None and has_impact(impact_plan,TargetDomain.PARTY_VERIFICATION):
+            verification_case=await case_collection.find_one(tenant_filter(user,{"load_id":e["load_id"],"status":"cleared"}),{"_id":0})
+            if verification_case:verification_plan=build_case_preinvalidation(verification_case,["rate_confirmation"],user["id"],utc_now())
+        if passport:
+            if verification_plan:
+                pp=build_passport_preinvalidation(passport,verification_plan["effects"],user["id"],utc_now());invalidation={"required":True,"query":pp["query"],"update":pp["update"],"new_version":pp["update"]["version"]}
+            else:invalidation=build_preinvalidation(passport,["rate_confirmation"],user["id"],utc_now())
+            if invalidation.get("required"):
+                pa=await begin_audit(db.audit_events,user,"load_passport.material_change_invalidated",AuditEntityType.LOAD_PASSPORT,passport["id"],changed_fields=["rate_confirmation","status","version"],previous=passport)
+                pr=await db.load_passports.update_one(tenant_filter(user,invalidation["query"]),{"$set":invalidation["update"]})
+                if not pr.matched_count:await pa.rejected("version_conflict");await audit.rejected("passport_version_conflict");raise HTTPException(409,"Passport changed concurrently; rate confirmation was not superseded")
+                await pa.succeeded({"id":passport["id"],"status":"review_pending","version":invalidation["new_version"]})
+        if verification_plan and verification_plan.get("required"):
+            va=await begin_audit(db.audit_events,user,"party_verification.material_change_invalidated",AuditEntityType.PARTY_VERIFICATION_CASE,verification_case["id"],changed_fields=["rate_confirmation","status","version"],previous=verification_case)
+            vr=await case_collection.update_one(tenant_filter(user,verification_plan["query"]),{"$set":verification_plan["update"]})
+            if not vr.matched_count:await va.rejected("version_conflict");await audit.rejected("verification_version_conflict");raise HTTPException(409,"Verification case changed concurrently; rate confirmation was not superseded")
+            await va.succeeded({"id":verification_case["id"],"status":"review_pending","version":verification_plan["update"]["version"]})
+        execution_impact=impact_for(impact_plan,TargetDomain.EXECUTION_ELIGIBILITY)
+        if execution_impact:await preinvalidate_for_load(db,user,e["load_id"],list(execution_impact.change_types))
+        if has_impact(impact_plan,TargetDomain.INVOICE_READINESS):await invalidate_invoice_readiness(db,user,e["load_id"],"rate_confirmation_changed",["supersession",eid])
         return await _replace(db,audit,user,e,{"status":"superseded","superseded_at":utc_now(),"superseded_by":user["id"],"supersession_reason":data.reason},"supersede")
