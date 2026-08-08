@@ -9,7 +9,7 @@ def session(tenant=TA):return {"id":"S1","tenant_id":tenant,"load_id":"L1","vers
 @pytest.fixture
 def api(monkeypatch):
  db=FakeDB()
- for n in ("execution_sessions","execution_events","execution_exceptions","execution_eligibility_cases","pickup_release_cases","invoice_readiness_cases","invoice_packages","invoices"):setattr(db,n,Collection(n,db.events))
+ for n in ("execution_sessions","execution_events","execution_exceptions","execution_eligibility_cases","pickup_release_cases","invoice_readiness_cases","invoice_packages","invoices","operations","outbox_events","reconciliation_items"):setattr(db,n,Collection(n,db.events))
  db.loads.docs=[{**copy.deepcopy(LOAD),"stage":"Delivered"},{**copy.deepcopy(LOAD),"id":"LB","tenant_id":TB,"stage":"Delivered"}];db.execution_sessions.docs=[session(),{**session(TB),"id":"SB","load_id":"LB"}]
  db.documents.docs=[{"id":"POD","tenant_id":TA,"load_id":"L1","doc_type":"pod","filename":"pod.pdf"},{"id":"RC","tenant_id":TA,"load_id":"L1","doc_type":"rate_con","filename":"rate.pdf"},{"id":"LUMP","tenant_id":TA,"load_id":"L1","doc_type":"lumper","filename":"receipt.pdf"},{"id":"FPOD","tenant_id":TB,"load_id":"LB","doc_type":"pod"}]
  rate=extraction(status="accepted");rate.update({"id":"R1","document_id":"RC","revision":2,"version":2});rate["extracted_fields"]={"total_rate":1200};db.rate_confirmation_extractions.docs=[rate]

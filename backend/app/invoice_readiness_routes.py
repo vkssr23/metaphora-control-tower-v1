@@ -1,12 +1,15 @@
 import secrets
 from datetime import datetime,timezone
-from fastapi import Depends,HTTPException,Query,status
+from fastapi import Depends,Header,HTTPException,Query,Request,status
 from app.audit import begin_audit
 from app.schemas.audit import AuditEntityType
 from app.schemas.invoice_readiness import *
 from app.tenant import tenant_document,tenant_filter,require_tenant_id
 from app.domain.invoice_readiness import evaluate,canonical_hash,evidence_ok,select_current_rate,basis_fingerprint,invalidation_plan
 from app.invoice_readiness_invalidation import invalidate_invoice_readiness
+from app.infrastructure.operations import OperationConflict,create_or_replay,idempotency_identity,transition
+from app.infrastructure.outbox import enqueue
+from app.infrastructure.reconciliation import ensure_reconciliation
 
 FINANCE={"finance","owner","admin"}; OWNER={"owner","admin"}; OPS=FINANCE|{"operations","dispatcher"}
 def now():return datetime.now(timezone.utc).isoformat()
@@ -20,6 +23,14 @@ async def one(col,user,rid,label):
  x=await col.find_one(tenant_filter(user,{"id":rid}),{"_id":0})
  if not x:raise HTTPException(404,f"{label} not found")
  return clean(x)
+async def durable_invoice_replay(db,user,operation):
+ ref=operation.get("result_reference") or {};iid=ref.get("invoice_id");pid=ref.get("package_id")
+ if not iid or not pid:return None
+ inv=await db.invoices.find_one(tenant_filter(user,{"id":iid,"package_id":pid}),{"_id":0})
+ package=await db.invoice_packages.find_one(tenant_filter(user,{"id":pid,"invoice_id":iid}),{"_id":0})
+ case=await db.invoice_readiness_cases.find_one(tenant_filter(user,{"id":operation.get("target_id"),"status":"invoiced","invoice_id":iid,"invoice_package_id":pid}),{"_id":0})
+ event=await db.outbox_events.find_one(tenant_filter(user,{"operation_id":operation["id"],"event_type":"invoice.ready_for_submission","aggregate_type":"invoice","aggregate_id":iid}),{"_id":0})
+ return clean(inv) if inv and package and case and event else None
 async def active_case(db,user,lid):
  items=await db.invoice_readiness_cases.find(tenant_filter(user,{"load_id":lid}),{"_id":0}).sort([("updated_at",-1),("id",-1)]).to_list(50)
  return next((x for x in items if x.get("status")!="invoiced"),None)
@@ -162,27 +173,75 @@ def register_invoice_readiness_routes(api,db,get_current_user):
   if case["status"]!="approved":raise HTTPException(409,"Only approved readiness may be reopened")
   return await mutate(db,user,case,data,"invoice_readiness.reopened",{"status":"reopened","verdict":"pending","reopened_at":now(),"reopened_by":user["id"],"reopen_reason":data.reason})
  @api.post("/invoice-readiness-cases/{cid}/invoice",status_code=201)
- async def invoice(cid:str,data:VersionAction,user=Depends(get_current_user)):
+ async def invoice(cid:str,data:VersionAction,request:Request,idempotency_key:str|None=Header(None,alias="Idempotency-Key"),user=Depends(get_current_user)):
   permit(user,OWNER);case=await one(db.invoice_readiness_cases,user,cid,"Invoice readiness case")
+  tenant_id=require_tenant_id(user)
+  try:identity=idempotency_identity(tenant_id,"invoice.create","invoice_readiness_case",cid,idempotency_key)
+  except ValueError:raise HTTPException(422,"Invalid Idempotency-Key")
+  if idempotency_key:
+   existing=await db.operations.find_one(identity,{"_id":0})
+   if existing:
+    if existing.get("status")=="succeeded":
+     prior=await durable_invoice_replay(db,user,existing)
+     if prior:return clean(prior)
+     raise HTTPException(409,"Completed operation result is unavailable; reconciliation required")
+    if existing.get("status") in {"planned","started","committing"}:raise HTTPException(409,"Invoice operation is already in progress")
+    if existing.get("status")=="reconciliation_required":raise HTTPException(409,"Invoice operation requires reconciliation")
+    raise HTTPException(409,"Prior invoice operation cannot be retried")
   if case["version"]!=data.version:raise HTTPException(409,"Invoice readiness case changed concurrently")
   if case["status"]!="approved" or not case.get("calculation_snapshot") or case.get("invoice_creation_state") not in {None,"none"}:raise HTTPException(409,"Approved unclaimed readiness required")
   load,session,rate,docs,exc,rate_reason=await context(db,user,case);result=evaluate(load,session,rate,docs,case.get("accessorial_snapshot",[]),case.get("deduction_snapshot",[]),exc);fresh=snapshots(case,load,session,rate,docs,result,now(),user)
   if result["verdict"]!="ready" or fresh["financial_basis_fingerprint"]!=case.get("approved_basis_fingerprint"):
    await invalidate_invoice_readiness(db,user,case["load_id"],"invoice_basis_changed",["current_basis"]);raise HTTPException(409,"Approved invoice basis is stale and was reopened")
-  stamp=now();iid="inv_"+secrets.token_hex(12);pid="ipk_"+secrets.token_hex(12);operation="icr_"+secrets.token_hex(12)
-  audit=await begin_audit(db.audit_events,user,"invoice.created",AuditEntityType.INVOICE,iid,changed_fields=["id","amount","status","package_id"])
-  claim=await db.invoice_readiness_cases.update_one(tenant_filter(user,{"id":cid,"version":case["version"],"status":"approved","invoice_creation_state":case.get("invoice_creation_state")}),{"$set":{"invoice_creation_state":"creating","invoice_creation_operation_id":operation,"reserved_invoice_id":iid,"reserved_package_id":pid,"version":case["version"]+1,"updated_at":stamp,"updated_by":user["id"]}})
-  if not claim.matched_count:await audit.rejected("invoice_creation_claim_conflict");raise HTTPException(409,"Invoice creation already claimed or readiness changed")
-  claimed_version=case["version"]+1;docids=sorted({d.get("id") for d in fresh.get("document_snapshot",{}).get("documents",[]) if d.get("id")});package=tenant_document(user,{"id":pid,"readiness_case_id":cid,"readiness_case_version":claimed_version,"financial_basis_fingerprint":fresh["financial_basis_fingerprint"],"load_id":case["load_id"],"invoice_id":iid,"rate_snapshot":fresh["rate_snapshot"],"calculation_snapshot":fresh["calculation_snapshot"],"document_ids":docids,"status":"ready","created_at":stamp,"created_by":user["id"]});package["canonical_hash"]=canonical_hash(package)
-  async def reconcile(reason):
+  stamp=now();iid="inv_"+secrets.token_hex(12);pid="ipk_"+secrets.token_hex(12);operation="op_"+secrets.token_hex(16)
+  audit=await begin_audit(db.audit_events,user,"invoice.created",AuditEntityType.INVOICE,iid,changed_fields=["id","amount","status","package_id"],operation_id=operation)
+  try:
+   op,replayed=await create_or_replay(db.operations,tenant_id=tenant_id,operation_type="invoice.create",target_type="invoice_readiness_case",target_id=cid,idempotency_key=idempotency_key,request_id=getattr(request.state,"request_id",None),actor=user,audit_operation_id=operation)
+  except OperationConflict as exc:await audit.rejected(exc.code);raise HTTPException(409,"Invoice operation conflicts with an existing request")
+  except Exception:await audit.failed("operation_intent_failure");raise HTTPException(503,"Invoice operation intent could not be recorded")
+  if replayed:
+   prior=await durable_invoice_replay(db,user,op)
+   if not prior:await audit.rejected("idempotent_replay_unavailable");raise HTTPException(409,"Completed operation result is unavailable; reconciliation required")
+   await audit.rejected("idempotent_replay");return prior
+  async def opstep(step,status_value=None,failure=None,summary=None,result_reference=None):
+   nonlocal op
+   op=await transition(db.operations,op,status=status_value,step=step,step_status="failed" if failure else "completed",failure_code=failure,failure_summary=summary,result_reference=result_reference)
+  async def reconcile(reason,summary,step):
    await db.invoice_readiness_cases.update_one(tenant_filter(user,{"id":cid,"invoice_creation_operation_id":operation}),{"$set":{"invoice_creation_state":"reconciliation_required","invoice_creation_failure_reason":reason,"updated_at":now(),"updated_by":user["id"]}})
+   try:
+    await ensure_reconciliation(db.reconciliation_items,tenant_id=tenant_id,operation_id=operation,domain="invoice",entity_type="invoice_readiness_case",entity_id=cid,reason_code=reason,summary=summary)
+   finally:
+    await opstep(step,"reconciliation_required",reason,summary)
+  claim=await db.invoice_readiness_cases.update_one(tenant_filter(user,{"id":cid,"version":case["version"],"status":"approved","invoice_creation_state":case.get("invoice_creation_state")}),{"$set":{"invoice_creation_state":"creating","invoice_creation_operation_id":operation,"reserved_invoice_id":iid,"reserved_package_id":pid,"version":case["version"]+1,"updated_at":stamp,"updated_by":user["id"]}})
+  if not claim.matched_count:await opstep("readiness_claimed","failed","invoice_creation_claim_conflict","Readiness claim was lost");await audit.rejected("invoice_creation_claim_conflict");raise HTTPException(409,"Invoice creation already claimed or readiness changed")
+  await opstep("readiness_claimed")
+  claimed_version=case["version"]+1;docids=sorted({d.get("id") for d in fresh.get("document_snapshot",{}).get("documents",[]) if d.get("id")});package=tenant_document(user,{"id":pid,"readiness_case_id":cid,"readiness_case_version":claimed_version,"financial_basis_fingerprint":fresh["financial_basis_fingerprint"],"load_id":case["load_id"],"invoice_id":iid,"rate_snapshot":fresh["rate_snapshot"],"calculation_snapshot":fresh["calculation_snapshot"],"document_ids":docids,"status":"ready","created_at":stamp,"created_by":user["id"]});package["canonical_hash"]=canonical_hash(package)
   try:await db.invoice_packages.insert_one(package)
-  except Exception:await reconcile("package_failure");await audit.failed("package_failure");raise HTTPException(503,"Invoice package creation unavailable; claim requires reconciliation")
+  except Exception:await reconcile("package_failure","Invoice package creation failed after readiness claim","package_created");await audit.failed("package_failure");raise HTTPException(503,"Invoice package creation unavailable; claim requires reconciliation")
+  await opstep("package_created")
   inv=tenant_document(user,{"id":iid,"load_id":case["load_id"],"readiness_case_id":cid,"readiness_case_version":claimed_version,"financial_basis_fingerprint":fresh["financial_basis_fingerprint"],"package_id":pid,"amount":fresh["calculation_snapshot"]["billable_total"],"currency":"USD","status":"ready_for_submission","external_submission_status":"not_submitted","created_at":stamp,"created_by":user["id"],"version":1})
   try:await db.invoices.insert_one(inv)
-  except Exception:await reconcile("invoice_failure");await audit.failed("invoice_failure");raise HTTPException(503,"Invoice creation failed; package and claim preserved for reconciliation")
+  except Exception:await reconcile("invoice_failure","Invoice creation failed after package creation","invoice_created");await audit.failed("invoice_failure");raise HTTPException(503,"Invoice creation failed; package and claim preserved for reconciliation")
+  await opstep("invoice_created")
   r=await db.invoice_readiness_cases.update_one(tenant_filter(user,{"id":cid,"version":claimed_version,"status":"approved","invoice_creation_state":"creating","invoice_creation_operation_id":operation}),{"$set":{"status":"invoiced","invoice_creation_state":"ready","invoice_id":iid,"invoice_version":1,"invoice_package_id":pid,"version":claimed_version+1,"updated_at":stamp,"updated_by":user["id"]}})
-  if not r.matched_count:await reconcile("readiness_finalize_race");await audit.failed("readiness_finalize_race");raise HTTPException(409,"Invoice preserved; readiness finalization requires reconciliation")
+  if not r.matched_count:await reconcile("readiness_finalize_race","Invoice exists but readiness finalization lost its version guard","readiness_finalized");await audit.failed("readiness_finalize_race");raise HTTPException(409,"Invoice preserved; readiness finalization requires reconciliation")
+  await opstep("readiness_finalized","committing")
+  try:
+   await enqueue(db.outbox_events,tenant_id=tenant_id,operation_id=operation,event_type="invoice.ready_for_submission",aggregate_type="invoice",aggregate_id=iid,payload={"invoice_id":iid,"package_id":pid,"readiness_case_id":cid,"load_id":case["load_id"]})
+  except Exception:await reconcile("outbox_failure","Invoice exists but required durable downstream event was not recorded","outbox_recorded");await audit.failed("outbox_failure");raise HTTPException(503,"Invoice preserved; downstream event recording requires reconciliation")
+  try:await opstep("outbox_recorded","succeeded",result_reference={"invoice_id":iid,"package_id":pid})
+  except Exception:
+   current=await db.operations.find_one(tenant_filter(user,{"id":operation}),{"_id":0})
+   if current and current.get("status")=="succeeded" and await durable_invoice_replay(db,user,current):
+    await audit.succeeded({"id":iid,"status":"ready_for_submission","package_id":pid});return clean(inv)
+   try:await db.invoice_readiness_cases.update_one(tenant_filter(user,{"id":cid,"invoice_id":iid,"invoice_package_id":pid}),{"$set":{"invoice_creation_state":"reconciliation_required","invoice_creation_failure_reason":"operation_finalization_failed_after_outbox","updated_at":now(),"updated_by":user["id"]}})
+   except Exception:pass
+   try:await ensure_reconciliation(db.reconciliation_items,tenant_id=tenant_id,operation_id=operation,domain="invoice",entity_type="invoice_readiness_case",entity_id=cid,reason_code="operation_finalization_failed_after_outbox",summary="Invoice and outbox exist but operation success could not be finalized")
+   except Exception:pass
+   if current and current.get("status")=="committing":
+    try:op=await transition(db.operations,current,status="reconciliation_required",step="outbox_recorded",failure_code="operation_finalization_failed_after_outbox",failure_summary="Invoice and outbox exist but operation success could not be finalized",result_reference={"invoice_id":iid,"package_id":pid})
+    except Exception:pass
+   await audit.failed("operation_finalization_failed_after_outbox");raise HTTPException(503,"Invoice preserved; operation finalization requires reconciliation")
   await audit.succeeded({"id":iid,"status":"ready_for_submission","package_id":pid});return clean(inv)
  @api.get("/invoice-packages/{pid}")
  async def get_package(pid:str,user=Depends(get_current_user)):return await one(db.invoice_packages,user,pid,"Invoice package")
