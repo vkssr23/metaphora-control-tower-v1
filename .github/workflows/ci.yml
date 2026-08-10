@@ -1,0 +1,40 @@
+name: pilot-quality
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Syntax
+        run: python -m compileall -q app scripts tests
+      - name: Offline regression and Phase 2G
+        env:
+          APP_ENV: test
+          JWT_SECRET: ci-only-secret-ci-only-secret-ci-only-secret
+          CORS_ORIGINS: http://localhost:3000
+        run: pytest --ignore=tests/test_auth_signup.py --ignore=tests/test_metaphora.py
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+      - run: yarn install --frozen-lockfile
+      - run: yarn build

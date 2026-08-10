@@ -1,0 +1,7 @@
+# Direct Dependency Inventory
+
+Derived offline from `backend/requirements.txt` and `frontend/package.json`; it is not a vulnerability scan. Versions are declared constraints. Licenses not deterministically available from these manifests are `UNKNOWN / REVIEW REQUIRED`.
+
+Backend runtime: FastAPI 0.110.1 (API), Uvicorn 0.25.0 (server), Motor 3.3.1/PyMongo 4.6.3 (Mongo), Pydantic ≥2.6.4 (validation), PyJWT ≥2.10.1 and python-jose ≥3.3.0 (tokens), bcrypt 4.1.3/passlib ≥1.7.4 (passwords), cryptography ≥42.0.8 (security), python-multipart ≥0.0.9 (uploads), boto3 ≥1.34.129 (future adapter), requests/requests-oauthlib (HTTP), pandas/numpy (analysis), python-dotenv/tzdata/typer/jq/emergentintegrations. Backend test/tooling: pytest, pytest-xdist, black, isort, flake8, mypy. License: UNKNOWN / REVIEW REQUIRED for every entry pending an installed-metadata/SBOM review.
+
+Frontend direct runtime: React/React DOM 19.0.0, react-scripts 5.0.1, Axios 1.16.0, React Router DOM 7.15.0, TanStack Query, Radix UI packages, Recharts, Zod, date/time, form, styling and UI packages at the exact constraints in `package.json`. Build tooling includes CRACO, ESLint, Tailwind and PostCSS. License: UNKNOWN / REVIEW REQUIRED from this offline manifest. Security relevance is highest for HTTP, routing, build-chain, parsing, and auth-facing packages. Preserve lockfile integrity and review licenses/vulnerabilities before production.
