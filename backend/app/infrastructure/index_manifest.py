@@ -29,7 +29,7 @@ _MANIFEST = (
         "loads","drivers","trucks","documents","audit_events","load_passports","rate_confirmation_extractions",
         "party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions",
         "execution_events","execution_exceptions","invoice_readiness_cases","invoice_packages","invoices","assumptions",
-        "operations","outbox_events","reconciliation_items")),
+        "operations","outbox_events","reconciliation_items","action_items")),
     _i("trucks", "uq_trucks_tenant_truck_number", (("tenant_id",1),("truck_number",1)), unique=True, purpose="Truck number uniqueness"),
     _i("load_passports", "uq_load_passports_tenant_load", (("tenant_id",1),("load_id",1)), unique=True, purpose="One passport per load"),
     _i("rate_confirmation_extractions", "uq_rc_tenant_document_revision", (("tenant_id",1),("document_id",1),("revision",1)), unique=True, purpose="One extraction revision per document"),
@@ -51,6 +51,9 @@ _MANIFEST = (
     _i("operations", "ix_operations_tenant_status_updated", (("tenant_id",1),("status",1),("updated_at",1)), purpose="Stuck operation and reconciliation scan", priority="P1"),
     _i("outbox_events", "ix_outbox_claim_queue", (("tenant_id",1),("status",1),("next_attempt_at",1),("claim_expires_at",1)), purpose="Pending, retry, and expired-lease worker claim queue", priority="P1"),
     _i("reconciliation_items", "ix_reconciliation_open_queue", (("tenant_id",1),("status",1),("severity",1),("created_at",1)), purpose="Open reconciliation work queue", priority="P1", partial={"status":{"$in":["open","acknowledged"]}}),
+    _i("action_items", "uq_action_items_active_identity", (("tenant_id",1),("active_identity",1)), unique=True, partial={"status":{"$in":["open","acknowledged"]}}, purpose="One active projection identity per tenant while preserving resolved recurrence history"),
+    _i("action_items", "ix_action_items_queue", (("tenant_id",1),("status",1),("severity",1),("first_detected_at",1)), purpose="Bounded operator work queue", priority="P1"),
+    _i("action_items", "ix_action_items_load", (("tenant_id",1),("load_id",1),("status",1)), purpose="Load-scoped action lookup", priority="P1"),
     _i("loads", "ix_loads_tenant_stage_updated", (("tenant_id",1),("stage",1),("updated_at",-1)), purpose="Operations load queue", priority="P2"),
 )
 

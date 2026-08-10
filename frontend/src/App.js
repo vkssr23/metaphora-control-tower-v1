@@ -25,6 +25,7 @@ import AIAssistant from "./pages/AIAssistant";
 import Settings from "./pages/Settings";
 import LoadAnalysis from "./pages/LoadAnalysis";
 import Compliance from "./pages/Compliance";
+import ActionCenter from "./pages/ActionCenter";
 
 function Protected({ children }) {
   const { user } = useAuth();
@@ -49,6 +50,7 @@ export default function App() {
               <Route path="trucks" element={<Trucks />} />
               <Route path="drivers" element={<Drivers />} />
               <Route path="compliance" element={<Compliance />} />
+              <Route path="action-center" element={<ActionCenter />} />
               <Route path="dispatch" element={<Dispatch />} />
               <Route path="in-transit" element={<InTransit />} />
               <Route path="weather" element={<WeatherRoad />} />

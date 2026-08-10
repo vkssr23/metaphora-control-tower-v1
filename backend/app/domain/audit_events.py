@@ -64,7 +64,7 @@ ALLOWED_ACTIONS = {
     "invoice_readiness.approved", "invoice_readiness.blocked", "invoice_readiness.reopened",
     "invoice_readiness.material_change_invalidated", "accessorial.created", "accessorial.updated",
     "accessorial.approved", "accessorial.rejected", "invoice_package.created",
-    "invoice_package.superseded", "invoice.ready_for_submission",
+    "invoice_package.superseded", "invoice.ready_for_submission", "action_center.acknowledged",
 }
 SAFE_FIELDS = {
     "id", "truck_number", "status", "assigned_driver_id", "assigned_truck_id",
