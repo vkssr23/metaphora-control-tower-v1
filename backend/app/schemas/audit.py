@@ -47,6 +47,7 @@ class AuditEntityType(str, Enum):
     INVOICE_READINESS_CASE = "invoice_readiness_case"
     ACCESSORIAL = "accessorial"
     INVOICE_PACKAGE = "invoice_package"
+    ACTION_ITEM = "action_item"
 
 
 class AuditEvent(BaseModel):

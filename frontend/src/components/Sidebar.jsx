@@ -12,6 +12,7 @@ const NAV = [
   { to: "/", label: "Executive Dashboard", icon: LayoutDashboard, roles: ["owner","dispatcher","finance","admin","driver","operations","safety","compliance"] },
   { to: "/analyze", label: "Load Market Analysis", icon: LineChart, roles: ["owner","dispatcher","operations","admin"] },
   { to: "/board", label: "Dispatch Board", icon: Columns3, roles: ["owner","dispatcher","operations","admin"] },
+  { to: "/action-center", label: "Action Center", icon: BellRing, roles: ["owner","dispatcher","finance","admin","operations","safety","compliance"] },
   { to: "/loads", label: "Loads", icon: Package, roles: ["owner","dispatcher","finance","admin","operations"] },
   { to: "/trucks", label: "Trucks", icon: TruckIcon, roles: ["owner","dispatcher","operations","admin"] },
   { to: "/drivers", label: "Drivers", icon: Users, roles: ["owner","dispatcher","operations","admin","safety"] },

@@ -11,9 +11,9 @@ from app.infrastructure.index_manifest import expected_indexes
 from app.tenant import TENANT_ID_PATTERN
 
 SEVERITIES=("critical","high","medium","low","info")
-TENANT_SCOPED=frozenset({"users","loads","drivers","trucks","documents","audit_events","load_passports","rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions","execution_events","execution_exceptions","invoice_readiness_cases","invoice_packages","invoices","assumptions","operations","outbox_events","reconciliation_items"})
+TENANT_SCOPED=frozenset({"users","loads","drivers","trucks","documents","audit_events","load_passports","rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions","execution_events","execution_exceptions","invoice_readiness_cases","invoice_packages","invoices","assumptions","operations","outbox_events","reconciliation_items","action_items"})
 SUPPORTED_DOCUMENT_TYPES=frozenset({"rate_con","bol","pod","lumper","scale","invoice","other","insurance"})
-REQUIRED_VERSION=frozenset({"load_passports","rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions","execution_exceptions","invoice_readiness_cases","operations","outbox_events","reconciliation_items"})
+REQUIRED_VERSION=frozenset({"load_passports","rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions","execution_exceptions","invoice_readiness_cases","operations","outbox_events","reconciliation_items","action_items"})
 PARENTS={
  "documents":(("load_id","loads"),), "load_passports":(("load_id","loads"),),
  "rate_confirmation_extractions":(("load_id","loads"),("document_id","documents")),
@@ -166,6 +166,14 @@ def scan_integrity(records: Mapping[str,Sequence[Mapping[str,Any]]], *, environm
     for tenant_load in {(x.get("tenant_id"),x.get("load_id")) for x in invoices}:
         same=[x for x in invoices if (x.get("tenant_id"),x.get("load_id"))==tenant_load]
         if any(x.get("readiness_case_id") for x in same) and any(not x.get("readiness_case_id") for x in same):add(_finding("LEGACY_MODERN_INVOICE_AUTHORITY_CONFLICT","critical","invoices","Load has both legacy and modern invoice authority",same[0],len(same),"Resolve canonical invoice authority in Phase 2C"))
+    actions=records.get("action_items",())
+    active_action_identities=set()
+    for action in actions:
+        identity=(action.get("tenant_id"),action.get("active_identity"))
+        if action.get("status") in {"open","acknowledged"}:
+            if identity in active_action_identities:add(_finding("ACTION_CENTER_ACTIVE_IDENTITY_DUPLICATE","high","action_items","Duplicate active Action Center identity",action))
+            active_action_identities.add(identity)
+        if action.get("status")=="resolved" and not action.get("resolved_at"):add(_finding("ACTION_CENTER_RESOLUTION_TIMESTAMP_MISSING","medium","action_items","Resolved Action Center item lacks resolution time",action))
     operations=records.get("operations",()); outbox=records.get("outbox_events",()); reconciliations=records.get("reconciliation_items",())
     operation_ids={(x.get("tenant_id"),x.get("id")) for x in operations}
     reconciliation_operations={(x.get("tenant_id"),x.get("operation_id")) for x in reconciliations if x.get("status") in {"open","acknowledged"}}

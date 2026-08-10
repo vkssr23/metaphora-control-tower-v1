@@ -28,6 +28,7 @@ from app.api.legacy_invoice_routes import register_legacy_invoice_routes
 from app.api.demo_routes import register_demo_routes
 from app.api.query_routes import register_query_routes
 from app.api.health_routes import register_health_routes
+from app.api.action_center_routes import register_action_center_routes
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -74,6 +75,7 @@ register_execution_eligibility_routes(api, runtime_db, get_current_user)
 register_pickup_release_routes(api, runtime_db, get_current_user)
 register_in_transit_execution_routes(api, runtime_db, get_current_user)
 register_invoice_readiness_routes(api, runtime_db, get_current_user)
+register_action_center_routes(api, runtime_db, get_current_user)
 register_health_routes(public_api, get_current_user)
 
 app.include_router(public_api)
