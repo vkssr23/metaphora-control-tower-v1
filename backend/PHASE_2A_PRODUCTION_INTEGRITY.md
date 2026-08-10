@@ -87,3 +87,9 @@ Phase 2A does not implement Phase 2B transactions/outbox, the Mutation Impact Pl
 Relationship checks resolve populated fields as current/live references. They do not generally prove whether a frozen historical snapshot was intentionally retained after its former live parent was removed. Optional absent historical references are not treated as proof of integrity. Any workflow needing historical-reference semantics requires a later domain-specific migration review.
 
 A later disposable real-Mongo suite is still P0 and must validate partial unique indexes, collision behavior, transactions/topology, write concerns, sessions, and concurrency. Fake/plain-record tests do not prove those properties. A single real full-lifecycle test was not forced into Phase 2A because existing fixtures are route-phase-specific; it remains a Phase 2G P0 item covering Load → RC → Passport → Party → Eligibility → Pickup Release → Pickup Confirmed → Execution → Delivery → POD → Invoice Readiness → ready-for-submission.
+# Phase 2E document-storage clarification
+
+Phase 2E allows integrity scans to distinguish real stored-file metadata from
+legacy `mock://` references. This does not certify local filesystem durability:
+production-like multi-instance environments using the local adapter remain a
+readiness warning, and legacy mock records remain pilot/migration concerns.

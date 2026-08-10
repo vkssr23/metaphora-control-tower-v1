@@ -38,15 +38,20 @@ def _route_pairs():
 
 def test_route_method_path_parity_and_no_duplicates():
     pairs = _route_pairs()
-    assert len(pairs) == 167
+    assert len(pairs) == 169
     assert len(pairs) == len(set(pairs))
     assert LEGACY_ROUTE_PAIRS <= set(pairs)
+    assert {("POST","/api/documents/upload"),("GET","/api/documents/{document_id}/download")} <= set(pairs)
 
 
 def test_extracted_architecture_does_not_import_server_backwards():
     app_root = Path(__file__).parents[1] / "app"
     inspected = [*sorted((app_root / "api").glob("*_routes.py"))]
     inspected += [app_root / "runtime.py", app_root / "application" / "invoice_authority_query.py"]
+    inspected += [app_root / "application" / "document_service.py",
+                  app_root / "domain" / "document_evidence.py",
+                  app_root / "infrastructure" / "document_storage.py",
+                  app_root / "infrastructure" / "local_document_storage.py"]
     for path in inspected:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         imports = []

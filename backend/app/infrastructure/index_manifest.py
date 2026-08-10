@@ -47,6 +47,7 @@ _MANIFEST = (
     _i("execution_events", "ix_execution_events_session_time", (("tenant_id",1),("execution_session_id",1),("occurred_at",1),("id",1)), purpose="Execution chronology", priority="P1"),
     _i("execution_exceptions", "ix_execution_exceptions_open_queue", (("tenant_id",1),("status",1),("sla_due_at",1)), purpose="Open exception queue", priority="P1", partial={"status":{"$in":["open","acknowledged"]}}),
     _i("documents", "ix_documents_tenant_load_type", (("tenant_id",1),("load_id",1),("doc_type",1)), purpose="Load evidence lookup", priority="P1"),
+    _i("documents", "ix_documents_tenant_sha256", (("tenant_id",1),("sha256",1)), purpose="Tenant-private duplicate content lookup", priority="P1"),
     _i("operations", "ix_operations_tenant_status_updated", (("tenant_id",1),("status",1),("updated_at",1)), purpose="Stuck operation and reconciliation scan", priority="P1"),
     _i("outbox_events", "ix_outbox_claim_queue", (("tenant_id",1),("status",1),("next_attempt_at",1),("claim_expires_at",1)), purpose="Pending, retry, and expired-lease worker claim queue", priority="P1"),
     _i("reconciliation_items", "ix_reconciliation_open_queue", (("tenant_id",1),("status",1),("severity",1),("created_at",1)), purpose="Open reconciliation work queue", priority="P1", partial={"status":{"$in":["open","acknowledged"]}}),

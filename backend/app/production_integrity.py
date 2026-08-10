@@ -103,7 +103,14 @@ def scan_integrity(records: Mapping[str,Sequence[Mapping[str,Any]]], *, environm
     docs=records.get("documents",())
     for doc in docs:
         if doc.get("doc_type") not in SUPPORTED_DOCUMENT_TYPES:add(_finding("DOCUMENT_TYPE_UNSUPPORTED","high","documents","Document type is unknown",doc))
-        if not doc.get("filename") or not doc.get("url"):add(_finding("DOCUMENT_METADATA_MISSING","medium","documents","Document lacks filename or URL metadata",doc))
+        real=doc.get("storage_provider")=="local_filesystem"
+        if not doc.get("filename") or (not real and not doc.get("url")):add(_finding("DOCUMENT_METADATA_MISSING","medium","documents","Document lacks filename or reference metadata",doc))
+        if real:
+            if not all(doc.get(k) for k in ("storage_key","sha256","content_type","size_bytes")):add(_finding("DOCUMENT_STORAGE_METADATA_MISSING","high","documents","Stored document lacks required bounded storage metadata",doc))
+            if doc.get("storage_status") not in {"stored","storage_reconciliation_required","archived"}:add(_finding("DOCUMENT_STORAGE_STATE_INVALID","high","documents","Stored document has an invalid storage state",doc))
+            if doc.get("content_type") not in {"application/pdf","image/jpeg","image/png"}:add(_finding("DOCUMENT_CONTENT_TYPE_UNSUPPORTED","high","documents","Stored document content type is unsupported",doc))
+            if not isinstance(doc.get("size_bytes"),int) or doc.get("size_bytes",0)<=0:add(_finding("DOCUMENT_SIZE_INVALID","high","documents","Stored document size is invalid",doc))
+            if not re.fullmatch(r"[0-9a-f]{64}",str(doc.get("sha256",""))):add(_finding("DOCUMENT_HASH_MISSING","high","documents","Stored document lacks a canonical SHA-256",doc))
         url=str(doc.get("url","")).lower()
         if url.startswith(("mock://","fake://","placeholder://")) or "example.invalid" in url:add(_finding("DOCUMENT_STORAGE_SIMULATED","critical","documents","Document uses simulated or placeholder storage",doc,action="Move evidence to pilot-approved storage before pilot"))
     loads={(x.get("tenant_id"),x.get("id")):x for x in records.get("loads",())}
@@ -196,6 +203,7 @@ SIMULATED_CAPABILITIES=(
  {"id":"fuel_truck_stop","source":"/api/fuel/plan and /api/truckstops/plan","classification":"pilot_blocker","reachable_by_default":True,"runtime_gate":None},
  {"id":"random_dashboard","source":"dashboard/demo calculations","classification":"development_only","reachable_by_default":True,"runtime_gate":None},
  {"id":"mock_document_storage","source":"DocumentCreate mock:// support","classification":"pilot_blocker","reachable_by_default":True,"runtime_gate":None},
+ {"id":"local_document_storage","source":"POST /api/documents/upload","classification":"development_only","reachable_by_default":True,"runtime_gate":None},
  {"id":"seed_data","source":"POST /api/seed","classification":"development_only","reachable_by_default":False,"runtime_gate":"ALLOW_SEED_ENDPOINT"},)
 
 def evaluate_environment(config: Mapping[str,Any]):
@@ -207,6 +215,9 @@ def evaluate_environment(config: Mapping[str,Any]):
     cors=str(config.get("CORS_ORIGINS","")).strip(); item("CORS","unsafe" if not cors or "*" in cors else "configured","Explicit CORS origins","critical")
     seed=str(config.get("ALLOW_SEED_ENDPOINT","false")).lower() in {"1","true","yes","on"}; item("SEED_ENDPOINT","unsafe" if prod and seed else "configured","Seed endpoint disabled for production-like environments","critical")
     frontend=str(config.get("FRONTEND_BACKEND_URL","")).strip(); item("FRONTEND_BACKEND_URL","configured" if frontend else "missing","Frontend backend URL explicit","medium")
+    document_backend=str(config.get("DOCUMENT_STORAGE_BACKEND","local")).strip().lower()
+    item("DOCUMENT_STORAGE","unsafe" if prod and document_backend=="local" else "configured",
+         "Local document storage is not durable shared object storage for production-like multi-instance deployments","high")
     capabilities=[]
     for cap in SIMULATED_CAPABILITIES:
         gate=cap["runtime_gate"]

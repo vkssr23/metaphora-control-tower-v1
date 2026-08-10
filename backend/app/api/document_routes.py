@@ -1,5 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, Request
+from fastapi import APIRouter, HTTPException, Depends, Query, Request, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
+from contextvars import ContextVar
+from io import BytesIO
 import os, logging, uuid, bcrypt, random, math, asyncio, re
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import List, Optional, Dict, Any
@@ -31,6 +33,42 @@ from app.schemas import (
     WeatherCheckRequest,
 )
 from app.runtime import db, settings, now_iso, new_id, clean_doc, safe_db, audited_db
+from app.application.document_service import stored_metadata
+from app.domain.document_evidence import DocumentValidationError
+from app.infrastructure.document_storage import DocumentObjectMissing, DocumentStorageError
+from app.infrastructure.local_document_storage import LocalDocumentStorage
+from app.schemas.documents import DocumentType
+
+
+_pending_upload = ContextVar("pending_document_upload", default=None)
+_storage_cache = {}
+
+
+def _public_document(document):
+    if not document: return document
+    result=dict(document); result.pop("_id",None); result.pop("storage_key",None)
+    return result
+
+
+def get_document_storage():
+    if settings.document_storage_backend != "local":
+        raise DocumentStorageError("Configured document storage backend is unavailable")
+    root = settings.document_storage_root
+    if root not in _storage_cache:
+        _storage_cache[root] = LocalDocumentStorage(root)
+    return _storage_cache[root]
+
+
+async def _read_bounded(upload: UploadFile, maximum: int) -> bytes:
+    chunks=[]; total=0
+    while True:
+        chunk=await upload.read(min(1024 * 1024, maximum + 1 - total))
+        if not chunk: break
+        total += len(chunk)
+        if total > maximum:
+            raise HTTPException(413, "Document exceeds the configured upload size limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def register_document_routes(api, get_current_user, operational_write):
@@ -39,12 +77,13 @@ def register_document_routes(api, get_current_user, operational_write):
     async def list_docs(load_id: Optional[str] = None, user=Depends(get_current_user)):
         if load_id: await require_tenant_reference(db.loads, user, load_id, "load")
         q = tenant_filter(user, {"load_id": load_id} if load_id else None)
-        return await db.documents.find(q, {"_id": 0}).to_list(1000)
+        return [_public_document(item) for item in await db.documents.find(q, {"_id": 0}).to_list(1000)]
 
     @api.post("/documents")
     async def create_doc(d: DocumentCreate, user=Depends(operational_write)):
         await require_tenant_reference(db.loads, user, d.load_id, "load")
-        doc = tenant_document(user, {"id": new_id("DOC"), **d.model_dump(mode="json"), "uploaded_at": now_iso(), "uploaded_by": user.get("name", user["id"])})
+        pending = _pending_upload.get()
+        doc = tenant_document(user, {"id": pending["id"] if pending else new_id("DOC"), **d.model_dump(mode="json"), **(pending["metadata"] if pending else {"source_type":"legacy_reference"}), "uploaded_at": now_iso(), "uploaded_by": user.get("name", user["id"]), "created_by_user_id": user["id"]})
         impact_plan=plan_mutation(SourceEntityType.DOCUMENT,doc["id"],MutationType.DOCUMENT_ADDED,context={"document_type":d.doc_type.value})
         audit = await begin_audit(db.audit_events, user, "document.created", AuditEntityType.DOCUMENT, doc["id"], changed_fields=list(d.model_fields_set), previous={"load_id": d.load_id})
         pickup_impact=impact_for(impact_plan,TargetDomain.PICKUP_RELEASE)
@@ -97,5 +136,80 @@ def register_document_routes(api, get_current_user, operational_write):
                 await passport_collection.update_one(tenant_filter(user, {"id": passport["id"], "version": invalidation_plan["new_version"], "status": "review_pending"}), {"$set": synchronization})
             except Exception:
                 logging.warning("Passport evidence synchronization failed after document create")
-        return doc
+        return _public_document(doc)
+
+    @api.post("/documents/upload", status_code=201)
+    async def upload_document(
+        load_id: str = Form(..., min_length=1, max_length=100),
+        doc_type: DocumentType = Form(...),
+        file: UploadFile = File(...),
+        notes: str = Form("", max_length=5000),
+        user=Depends(operational_write),
+    ):
+        await require_tenant_reference(db.loads, user, load_id, "load")
+        content = await _read_bounded(file, settings.document_max_upload_bytes)
+        did = new_id("DOC")
+        storage = get_document_storage()
+        try:
+            metadata = stored_metadata(tenant_id=user["tenant_id"], document_id=did,
+                filename=file.filename, content_type=file.content_type, content=content,
+                provider=storage.provider)
+        except DocumentValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        duplicates = await db.documents.find(tenant_filter(user,{"sha256":metadata["sha256"]})).to_list(11)
+        matching = [item["id"] for item in duplicates if item.get("id") != did][:10]
+        metadata.update({"url":f"stored://{did}", "duplicate_sha256":bool(matching),
+                         "matching_document_ids":matching})
+        upload_audit = await begin_audit(db.audit_events,user,"document.upload_started",
+            AuditEntityType.DOCUMENT,did,changed_fields=["load_id","doc_type","file"],
+            previous={"load_id":load_id})
+        stored = False
+        try:
+            storage.put(metadata["storage_key"],content); stored=True
+            token = _pending_upload.set({"id":did,"metadata":metadata})
+            try:
+                result = await create_doc(DocumentCreate(load_id=load_id,doc_type=doc_type,
+                    filename="upload.bin",url="mock://upload.bin",notes=notes),user)
+            finally:
+                _pending_upload.reset(token)
+            await upload_audit.succeeded({"id":did,"load_id":load_id,"storage_status":"stored"})
+            return result
+        except HTTPException as exc:
+            record = await db.documents.find_one(tenant_filter(user,{"id":did}),{"_id":0}) if stored else None
+            if stored and not record:
+                try: storage.delete_if_uncommitted(metadata["storage_key"])
+                except Exception: logging.error("Uncommitted document cleanup failed for %s",did)
+            elif record:
+                await db.documents.update_one(tenant_filter(user,{"id":did}),{"$set":{"storage_status":"storage_reconciliation_required"}})
+            await upload_audit.failed("upload_failed")
+            raise
+        except Exception as exc:
+            if stored:
+                record = await db.documents.find_one(tenant_filter(user,{"id":did}),{"_id":0})
+                if record:
+                    await db.documents.update_one(tenant_filter(user,{"id":did}),{"$set":{"storage_status":"storage_reconciliation_required"}})
+                else:
+                    try: storage.delete_if_uncommitted(metadata["storage_key"])
+                    except Exception: logging.error("Uncommitted document cleanup failed for %s",did)
+            await upload_audit.failed("internal_failure")
+            raise HTTPException(503,"Document upload did not reach a complete durable state") from exc
+
+    @api.get("/documents/{document_id}/download")
+    async def download_document(document_id: str, user=Depends(get_current_user)):
+        doc=await db.documents.find_one(tenant_filter(user,{"id":document_id}),{"_id":0})
+        if not doc: raise HTTPException(404,"Document not found")
+        if doc.get("storage_provider")!="local_filesystem" or not doc.get("storage_key"):
+            raise HTTPException(409,"Document is a legacy reference without retrievable stored bytes")
+        if doc.get("storage_status")!="stored":
+            raise HTTPException(503,"Document storage requires reconciliation")
+        try:
+            stream=get_document_storage().open(doc["storage_key"])
+        except DocumentObjectMissing as exc:
+            raise HTTPException(503,"Stored document object is unavailable") from exc
+        filename=doc.get("safe_filename") or "document"
+        quoted=filename.replace('"',"'")
+        return StreamingResponse(stream,media_type=doc["content_type"],headers={
+            "Content-Disposition":f'attachment; filename="{quoted}"',
+            "X-Content-Type-Options":"nosniff",
+        })
 

@@ -73,12 +73,24 @@ class Settings:
     cors_origins: list[str]
     app_env: str
     allow_seed_endpoint: bool
+    document_storage_backend: str = "local"
+    document_storage_root: str = "./data/documents"
+    document_max_upload_bytes: int = 15 * 1024 * 1024
 
     @classmethod
     def from_env(cls) -> "Settings":
+        maximum = int(os.environ.get("DOCUMENT_MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
+        if maximum < 1024 or maximum > 100 * 1024 * 1024:
+            raise RuntimeError("DOCUMENT_MAX_UPLOAD_BYTES must be between 1 KiB and 100 MiB")
+        backend = os.environ.get("DOCUMENT_STORAGE_BACKEND", "local").strip().lower()
+        if backend != "local":
+            raise RuntimeError("Only the local document storage backend is implemented")
         return cls(
             jwt_secret=validate_jwt_secret(os.environ.get("JWT_SECRET")),
             cors_origins=parse_cors_origins(os.environ.get("CORS_ORIGINS")),
             app_env=os.environ.get("APP_ENV", "production").strip().lower(),
             allow_seed_endpoint=env_flag("ALLOW_SEED_ENDPOINT"),
+            document_storage_backend=backend,
+            document_storage_root=os.environ.get("DOCUMENT_STORAGE_ROOT", "./data/documents"),
+            document_max_upload_bytes=maximum,
         )
