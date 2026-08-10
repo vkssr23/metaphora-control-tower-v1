@@ -35,7 +35,7 @@ No internet penetration test, provider call, SSRF fetch, production access, AI, 
 
 ## CI quality gates
 
-PR CI performs backend syntax, the offline suite excluding only approved preview/network modules, explicit Phase 2G discovery, and the existing frontend production build. It has no deployment, provider, production DB, or secret-printing step. Workflow syntax was inspected locally; GitHub Actions was not remotely executed.
+PR CI performs backend syntax, the offline suite excluding only approved preview/network modules, explicit Phase 2G discovery, and the existing frontend production build. It has no deployment, provider, production DB, or secret-printing step. The first remote backend CI run exposed that the legacy demo `emergentintegrations==0.2.0` package was not portable to a clean public Python environment. Phase 2G.2 removed that optional legacy AI dependency from the core manifest and made the legacy endpoint controlled-unavailable when its runtime or key is absent. The first remote frontend CI run then exposed a pre-existing `react-hooks/exhaustive-deps` warning in the Load Execution Samsara effect; CI correctly treated the warning as an error. Phase 2G.3 corrected the effect's dependency semantics using a truck-ID-bound callback rather than weakening the CI gate. **LOCAL CI-EQUIVALENT FRONTEND BUILD: PASS. REMOTE GITHUB CI: PENDING RE-RUN.** These corrections add no AI or telematics capability certification; GitHub Actions must rerun to prove the corrected clean install and frontend build remotely.
 
 ## Governance and operations
 

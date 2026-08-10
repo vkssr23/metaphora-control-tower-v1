@@ -9,3 +9,4 @@
 | TD-005 | Action Center | P2 | Request-driven refresh, 5,000/source boundary, first 50 UI results | 2F | Pilot bound accepted | Queue volume exceeds bounds | Open |
 | TD-006 | Recovery | P1 | Full backup/restore drill unexecuted | 2G | No disposable staging DB | Before customer data | Open |
 | TD-007 | Identity | P2 | SSO/SCIM deferred | 2G | Not needed for controlled pilot | Enterprise identity demand | Deferred |
+| TD-008 | Legacy AI demo | P2 | `/api/ai/chat` depends on a deferred non-core Emergent runtime | 2G.2 | AI is outside pilot scope; avoid replacing it ad hoc | Future Agent Tool & Approval Plane | Deferred |

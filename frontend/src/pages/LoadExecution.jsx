@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Topbar from "../components/Topbar";
 import api from "../lib/api";
@@ -50,6 +50,7 @@ export default function LoadExecution() {
   const [samsara, setSamsara] = useState(null);
   const [documents, setDocuments] = useState([]);
   const [alertMsg, setAlertMsg] = useState("");
+  const samsaraRequest = useRef(0);
 
   const refresh = () => Promise.all([
     api.get(`/loads/${id}`).then(r=>setLoad(r.data)),
@@ -67,8 +68,26 @@ export default function LoadExecution() {
   const driver = load ? drivers.find(d => d.id === load.driver_id) : null;
   const truck  = load ? trucks.find(t => t.id === load.truck_id) : null;
   const stageIndex = load ? STAGES.indexOf(load.stage) : -1;
+  const truckId = truck?.id;
 
-  useEffect(() => { if (truck) fetchSamsara(); /* eslint-disable-next-line */ }, [truck?.id]);
+  const fetchSamsara = useCallback(async () => {
+    const requestId = ++samsaraRequest.current;
+    if (!truckId) {
+      setSamsara(null);
+      return;
+    }
+    try {
+      const { data } = await api.post("/samsara/vehicle", { truck_id: truckId });
+      if (requestId === samsaraRequest.current) setSamsara(data);
+    } catch {
+      if (requestId === samsaraRequest.current) setSamsara(null);
+    }
+  }, [truckId]);
+
+  useEffect(() => {
+    fetchSamsara();
+    return () => { samsaraRequest.current += 1; };
+  }, [fetchSamsara]);
 
   if (!load) return <div className="p-6 text-zinc-500">Loading…</div>;
 
@@ -112,19 +131,6 @@ export default function LoadExecution() {
     setFuel(data);
     toast.success("Fuel stop planned");
   };
-  const fetchSamsara = async () => {
-    if (!truck) {
-      setSamsara(null);
-      return;
-    }
-    try {
-      const { data } = await api.post("/samsara/vehicle", { truck_id: truck.id });
-      setSamsara(data);
-    } catch {
-      setSamsara(null);
-    }
-  };
-
   const generateAlert = async (type, msg) => {
     const { data } = await api.post("/alerts/generate", { load_id: id, alert_type: type, message: msg || `Auto-generated ${type} alert.` });
     setAlertMsg(data.message);

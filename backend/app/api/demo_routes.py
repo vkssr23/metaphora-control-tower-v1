@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 import os, logging, uuid, bcrypt, random, math, asyncio, re
+from importlib import import_module
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
@@ -265,6 +266,17 @@ def register_demo_routes(api, get_current_user, operational_write, ai_access, ow
     # ============ AI ASSISTANT (Claude Sonnet) ============
     @api.post("/ai/chat")
     async def ai_chat(data: AiChatRequest, user=Depends(ai_access)):
+        try:
+            provider = import_module("emergentintegrations.llm.chat")
+        except ModuleNotFoundError:
+            raise HTTPException(503, "LEGACY_AI_PROVIDER_UNAVAILABLE")
+        provider_key = EMERGENT_LLM_KEY or os.environ.get("EMERGENT_LLM_KEY", "")
+        if not provider_key:
+            raise HTTPException(503, "LEGACY_AI_PROVIDER_UNAVAILABLE")
+        LlmChat = provider.LlmChat
+        UserMessage = provider.UserMessage
+        TextDelta = provider.TextDelta
+        StreamDone = provider.StreamDone
         # Gather live data context
         scope = tenant_filter(user)
         loads = await safe_db(db.loads.find(scope, {"_id": 0}).to_list(200), "AI load context")
@@ -280,9 +292,8 @@ def register_demo_routes(api, get_current_user, operational_write, ai_access, ow
 
         async def stream():
             try:
-                from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
                 chat = LlmChat(
-                    api_key=EMERGENT_LLM_KEY,
+                    api_key=provider_key,
                     session_id=data.session_id,
                     system_message=context,
                 ).with_model("anthropic", "claude-sonnet-4-6")
