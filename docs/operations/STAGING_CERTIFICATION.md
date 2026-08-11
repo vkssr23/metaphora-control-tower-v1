@@ -1,26 +1,27 @@
 # Controlled Staging Certification
 
 Status: PREPARATION COMPLETE; ENVIRONMENT INPUT REQUIRED  
-Certification timestamp: 2026-08-10 (America/New_York)  
+Certification timestamp: 2026-08-11 (America/New_York)
 Repository/branch: `metaphora-control-tower-v1` / `staging-certification`  
+Diagnostic correction pre-flight HEAD: `866ddd7` — controlled staging certification preparation
 Base/HEAD at pre-flight: `247660d` — Phase 2G: Pilot Security & Golden Freight Flow Certification (#18)  
-Environment identity: NOT PROVIDED (no deployment or database connection attempted)
+Environment identity: Railway `mongo-certifier` connectivity context (non-secret); no application/customer environment accessed by this diagnostic change
 
 ## Evidence register
 
 | Gate | Result | Evidence / required action |
 |---|---|---|
 | Pre-flight | PASS | Correct branch and HEAD; starting tree clean; origin identified. |
-| Code Pilot Candidate | PASS | Phase 2G baseline retained; post-change approved offline regression passed 910 tests and frontend production build compiled successfully. |
+| Code Pilot Candidate | PASS | Phase 2G baseline retained; safe-diagnostics approved offline regression passed 913 tests. Existing frontend build remains unchanged. |
 | Existing harness review | DEFECT CORRECTED | Old harness dropped a name-guarded DB before proving it empty/owned and covered only one partial index. It now requires explicit disposable confirmation, refuses nonempty DBs, derives its plan from the manifest, and owns cleanup. |
 | Index manifest dry review | PASS | Authoritative manifest only; machine-readable plan available with `verify_real_mongo.py --plan --json`. Duplicate identity/direction validation is offline tested. |
 | Real-Mongo safety guard | PASS (code); NOT EXECUTED (environment) | No fallback; test/staging APP_ENV only; disposable name; explicit no-customer/disposable confirmation; initial emptiness required. |
-| Disposable Mongo | UNAVAILABLE | `METAPHORA_TEST_MONGO_URI`, DB, and confirmation were absent by presence-only inspection. REAL MONGO CERTIFICATION REQUIRES EXPLICIT DISPOSABLE URI. |
+| Disposable Mongo | REACHABLE; CERTIFICATION RERUN PENDING | Operator execution confirmed Railway Mongo connectivity and authentication. MongoDB server version was manually observed as 8.0.28. The first certification run failed with bounded `OperationFailure`; v1 diagnostics did not identify its exact stage. Safe stage/index/code instrumentation is now added; do not infer an index or concurrency defect until rerun evidence identifies the boundary. |
 | Index application/unique/partial semantics | NOT EXECUTED | Requires guarded disposable Mongo. Harness covers email policy, Action Center recurrence, execution history, operation null/missing key semantics, invoice/package authority. |
 | Mongo topology/sessions/transactions | UNKNOWN / NOT EXECUTED | Harness uses server `hello`; transaction commit/abort runs only for session-capable replica-set/sharded topology. |
 | Pilot UoW mode | DURABLE_SAGA | Phase 2B default is explicit durable saga; observed transaction support will not auto-enable transactional mode. |
 | Real concurrency | NOT EXECUTED | Harness covers Action Center identity, atomic outbox lease/stale-finalize, operation idempotency, invoice claim, active execution authority. No exactly-once external-side-effect claim. |
-| Cleanup | NOT APPLICABLE | No DB was accessed. Executed harness may drop only an initially empty DB it owns. |
+| Cleanup | SAFETY RULE PRESERVED | This diagnostic change made no DB access. The harness may drop only a target proven empty and claimed by that run; failure after ownership still performs bounded cleanup. |
 | Staging configuration/JWT/CORS/seed | DEFINED / UNVERIFIED | Contract is in `STAGING_DEPLOYMENT_CHECKLIST.md`; actual staging values/behavior not available. Secret values must never enter this report. |
 | Document storage | LOCAL, SINGLE-HOST PILOT ONLY | Acceptable only with a restricted persistent volume and single instance. Restart/redeploy durability is UNKNOWN and mandatory. |
 | Deployment availability | UNAVAILABLE | No authorized staging connection and no Railway/Docker/Procfile/Nixpacks deployment definition found. STAGING DEPLOYMENT REQUIRES OPERATOR ACTION. |
@@ -34,7 +35,7 @@ Environment identity: NOT PROVIDED (no deployment or database connection attempt
 | Performance smoke/observability | NOT EXECUTED | Bounded endpoints and request-ID test defined. |
 | Pilot readiness evaluator | BLOCKED | Evaluator now requires actual deployment, Mongo, concurrency, durability, recovery, integrity, and behavioral evidence. |
 | Python syntax | PASS | `compileall -q app scripts tests` using an isolated bytecode cache. |
-| Backend regression | PASS | 910 passed, 6 deprecation warnings. |
+| Backend regression | PASS | 913 passed, 6 deprecation warnings after safe diagnostic instrumentation. |
 | Frontend build | PASS | Optimized Create React App production build compiled successfully. |
 | GitHub CI | NOT EXECUTED FOR LOCAL CHANGES | Phase 2G base was green; local uncommitted changes have no CI run. |
 | Customer Pilot Ready | NOT EVALUATED | Explicitly outside this workstream. |

@@ -30,6 +30,21 @@ TRUE = {"1", "true", "yes", "confirmed"}
 PREFIX = "phase2g-cert-"
 
 
+def _operation_failure_report(exc, stage, context=None):
+    """Return only bounded Mongo metadata; never serialize exception text/details."""
+    details = exc.details if isinstance(getattr(exc, "details", None), dict) else {}
+    report = {
+        "status": "FAIL", "reason_code": "OperationFailure", "stage": stage,
+        "mongo_error_code": getattr(exc, "code", None),
+        "mongo_error_code_name": getattr(exc, "code_name", None) or details.get("codeName"),
+        "production_accessed": False, "customer_data_accessed": False, "uri_included": False,
+    }
+    for key in ("collection", "index_name"):
+        if context and context.get(key):
+            report[key] = context[key]
+    return report
+
+
 def guarded_target(env):
     uri = str(env.get("METAPHORA_TEST_MONGO_URI", "")).strip()
     db_name = str(env.get("METAPHORA_TEST_MONGO_DB", "")).strip()
@@ -111,7 +126,8 @@ async def _unique_semantics(db):
     return results
 
 
-async def _concurrency(db):
+async def _concurrency(db, stage):
+    stage["name"] = "concurrency_action_center"
     async def insert_action(n):
         try:
             await db.action_items.insert_one({"id": f"{PREFIX}race-a{n}", "tenant_id": PREFIX+"race",
@@ -119,6 +135,7 @@ async def _concurrency(db):
         except DuplicateKeyError: return False
     action = await asyncio.gather(*(insert_action(n) for n in range(8)))
 
+    stage["name"] = "concurrency_outbox"
     await db.outbox_events.insert_one({"id": PREFIX+"outbox", "tenant_id": PREFIX+"race", "operation_id": PREFIX+"op",
         "event_type": "cert", "aggregate_type": "load", "aggregate_id": PREFIX+"load", "status": "pending"})
     now = datetime.now(timezone.utc)
@@ -139,9 +156,12 @@ async def _concurrency(db):
             try: await collection.insert_one({**doc, "id": f"{doc['id']}{n}"}); return True
             except DuplicateKeyError: return False
         return sum(await asyncio.gather(*(attempt(n) for n in range(8))))
+    stage["name"] = "concurrency_operation"
     operation_winners = await race_insert(db.operations, {"id":PREFIX+"race-op", "tenant_id":PREFIX+"race",
         "operation_type":"cert", "target_type":"load", "target_id":"one", "idempotency_key":"one"})
+    stage["name"] = "concurrency_invoice"
     invoice_winners = await race_insert(db.invoices, {"id":PREFIX+"race-inv", "tenant_id":PREFIX+"race", "readiness_case_id":"one"})
+    stage["name"] = "concurrency_execution"
     execution_winners = await race_insert(db.execution_sessions, {"id":PREFIX+"race-exe", "tenant_id":PREFIX+"race",
         "load_id":"one", "status":"active"})
     result={"action_center_winners":sum(action), "outbox_lease_winners":sum(x is not None for x in leases),
@@ -153,32 +173,43 @@ async def _concurrency(db):
     return result
 
 
-async def verify(env):
+async def verify(env, client_factory=AsyncIOMotorClient):
+    stage = {"name": "guard_target", "context": {}}
     uri, db_name = guarded_target(env)
-    client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=4000)
+    stage["name"] = "connect"
+    client = client_factory(uri, serverSelectionTimeoutMS=4000)
     cleanup = "NOT_STARTED"
     owned = False
     report = None
     try:
+        stage["name"] = "hello"
         hello = await client.admin.command("hello")
         db = client[db_name]
+        stage["name"] = "target_empty_check"
         collections = await db.list_collection_names()
         if collections:
             raise RuntimeError("target database is not empty; harness ownership cannot be proven")
         owned = True
+        stage["name"] = "manifest_validation"
         plan = validate_plan()
         if plan["status"] != "PASS": raise RuntimeError("index manifest dry validation failed")
         created=[]
         for index in expected_indexes():
+            stage["name"] = "index_creation"
+            stage["context"] = {"collection": index.collection, "index_name": index.name}
             options={"name":index.name, "unique":index.unique}
             if index.partial_filter: options["partialFilterExpression"]=index.partial_filter
             await db[index.collection].create_index(list(index.fields), **options); created.append(index.name)
+        stage["name"] = "index_comparison"
+        stage["context"] = {}
         observed={c:_observed(await db[c].list_indexes().to_list(length=200)) for c in sorted({x.collection for x in expected_indexes()})}
         comparison=compare_indexes(observed)
+        stage["name"] = "topology_probe"
         topology = "sharded_cluster" if hello.get("msg") == "isdbgrid" else "replica_set" if hello.get("setName") else "standalone"
         sessions = hello.get("logicalSessionTimeoutMinutes") is not None
         transaction="UNSUPPORTED_TOPOLOGY"
         if sessions and topology in {"replica_set", "sharded_cluster"}:
+            stage["name"] = "transaction_probe"
             session=await client.start_session()
             try:
                 session.start_transaction()
@@ -190,23 +221,36 @@ async def verify(env):
                 await session.commit_transaction()
                 if await db.phase2g_probe.count_documents({"_id":{"$in":["commit-a","commit-b"]}}) != 2: raise RuntimeError("transaction commit probe failed")
                 transaction="SUPPORTED_COMMIT_ABORT_VERIFIED"
-            except (OperationFailure, ConfigurationError, InvalidOperation): transaction="UNSUPPORTED_TOPOLOGY"
+            except (ConfigurationError, InvalidOperation): transaction="UNSUPPORTED_TOPOLOGY"
             finally: await session.end_session()
+        stage["name"] = "unique_semantics"
         semantics=await _unique_semantics(db)
-        concurrency=await _concurrency(db)
+        concurrency=await _concurrency(db, stage)
         ok=not comparison["missing"] and not comparison["mismatched"] and all(semantics.values()) and concurrency["status"]=="PASS"
+        stage["name"] = "build_info"
         build_info=await client.admin.command("buildInfo")
         report={"status":"PASS" if ok else "FAIL", "database_classification":"DISPOSABLE_TEST",
             "mongo_version":build_info.get("version", "unknown"), "topology":topology, "sessions_supported":sessions,
             "transaction_capability":transaction, "pilot_uow_mode":"durable_saga", "index_plan_status":plan["status"],
             "indexes":{"created":created, **comparison}, "unique_semantics":semantics, "concurrency":concurrency,
             "production_accessed":False, "customer_data_accessed":False, "uri_included":False}
-        return report
+    except OperationFailure as exc:
+        report = _operation_failure_report(exc, stage["name"], stage["context"])
     finally:
         if owned:
-            await client.drop_database(db_name); cleanup="OWNED_DISPOSABLE_DATABASE_DROPPED"
+            try:
+                stage["name"] = "cleanup"
+                await client.drop_database(db_name); cleanup="OWNED_DISPOSABLE_DATABASE_DROPPED"
+            except OperationFailure as exc:
+                cleanup="OWNED_DISPOSABLE_DATABASE_CLEANUP_FAILED"
+                cleanup_error=_operation_failure_report(exc, "cleanup")
+                if report is None or report.get("status") == "PASS": report=cleanup_error
+                else: report["cleanup_error"]={k:cleanup_error[k] for k in ("stage","mongo_error_code","mongo_error_code_name")}
+        else:
+            cleanup="NOT_OWNED_NO_DROP"
         if report is not None: report["cleanup_result"] = cleanup
         client.close()
+    return report
 
 
 def main(argv=None):
