@@ -250,6 +250,7 @@ def install_fake_ai_provider(monkeypatch):
 @pytest.mark.parametrize("role", ["owner", "admin"])
 def test_owner_and_admin_can_access_ai_with_mocked_provider(role, monkeypatch):
     install_fake_ai_provider(monkeypatch)
+    monkeypatch.setenv("EMERGENT_LLM_KEY", "test-provider-key")
     as_role(role)
     assert TestClient(server.app).post("/api/ai/chat", json={"message": "hello"}).status_code == 200
 

@@ -206,14 +206,17 @@ def test_foreign_alert_creates_no_activity(api):
     assert db.activity.docs==[]
 
 
-def test_ai_context_queries_are_tenant_scoped_without_provider_call(api):
+def test_ai_context_is_not_queried_when_optional_provider_is_unavailable(api, monkeypatch):
     _, db, _=api; user={"id":"UA","name":"A","role":"owner","tenant_id":TEN_A}
     for name in ("loads","trucks","drivers","invoices"):
         getattr(db,name).docs=[{"id":"A","tenant_id":"ten_A"},{"id":"B","tenant_id":"ten_B"}]
-    response=asyncio.run(server.ai_chat(AiChatRequest(message="hello"),user))
-    assert response.media_type=="text/plain"
+    import app.api.demo_routes as demo_routes
+    monkeypatch.setattr(demo_routes, "import_module", lambda name: (_ for _ in ()).throw(ModuleNotFoundError(name)))
+    with pytest.raises(HTTPException) as failure:
+        asyncio.run(server.ai_chat(AiChatRequest(message="hello"),user))
+    assert failure.value.status_code==503 and failure.value.detail=="LEGACY_AI_PROVIDER_UNAVAILABLE"
     for name in ("loads","trucks","drivers","invoices"):
-        assert getattr(db,name).queries[-1]=={"tenant_id":TEN_A}
+        assert not getattr(db,name).queries
 
 
 def test_signup_route_success_isolated_and_compatible(api):
