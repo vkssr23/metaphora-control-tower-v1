@@ -1,27 +1,52 @@
 # Controlled Staging Certification
 
-Status: PREPARATION COMPLETE; ENVIRONMENT INPUT REQUIRED  
-Certification timestamp: 2026-08-11 (America/New_York)
+Status: REAL-MONGO CERTIFIED; CONTROLLED STAGING NOT READY
+Certification evidence recorded: 2026-08-12 (America/New_York)
 Repository/branch: `metaphora-control-tower-v1` / `staging-certification`  
+Evidence-recording pre-flight HEAD: `d823256` — safe real-Mongo certification diagnostics
 Diagnostic correction pre-flight HEAD: `866ddd7` — controlled staging certification preparation
 Base/HEAD at pre-flight: `247660d` — Phase 2G: Pilot Security & Golden Freight Flow Certification (#18)  
-Environment identity: Railway `mongo-certifier` connectivity context (non-secret); no application/customer environment accessed by this diagnostic change
+Environment identity: Railway `staging-certification`, temporary `mongo-certifier` service, explicit disposable certification database only
+
+## Operator-observed real environment evidence
+
+The following was directly observed by the operator from the successful Railway run. Codex did not access Mongo or Railway and did not rerun the harness.
+
+- Certification **PASS**; database classification `DISPOSABLE_TEST`; MongoDB **8.0.28**, separately confirmed with `db.version()`.
+- Index plan **PASS**: all 49 intended manifest indexes created/verified, none missing or mismatched, and no unexpected index material to certification.
+- Topology **standalone**; sessions supported **true**; transactions **UNSUPPORTED_TOPOLOGY**.
+- `PILOT_UOW_MODE` **durable_saga**. Transactional atomicity is not claimed.
+- Unique/partial semantics **PASS**, covering Action Center active rejection/resolved recurrence, canonical-email policy, nonterminal execution/terminal history, invoice/package authority, operation identity, and missing/null optional idempotency behavior.
+- Real concurrency **PASS**: one winner each for Action Center, execution, invoice, operation, and outbox lease. Stale outbox finalization was rejected; valid-winner finalization succeeded.
+- Cleanup `OWNED_DISPOSABLE_DATABASE_DROPPED`; production accessed **false**; customer data accessed **false**; URI included **false**.
+- GitHub Auto Deploy is disabled on the temporary `mongo-certifier` service.
+
+### Environment-certification history
+
+The first attempt failed safely during index creation with `14031` / `OutOfDiskSpace`: the Railway Trial volume was 0.5 GB and MongoDB 8's index-build disk-space safety threshold applied. After moving to Hobby and live-resizing `mongodb-volume` to 5.00 GB, the rerun passed. This resolved infrastructure condition is not an open product defect and does not establish an index-manifest defect.
+
+## Offline/code verification
+
+Offline evidence is separate. Harness guards, bounded diagnostics, cleanup ownership, and manifest-plan tests passed in the approved 913-test backend suite. The existing frontend build is unchanged. No real-environment claim derives from offline tests alone.
 
 ## Evidence register
 
 | Gate | Result | Evidence / required action |
 |---|---|---|
-| Pre-flight | PASS | Correct branch and HEAD; starting tree clean; origin identified. |
+| Pre-flight | PASS | Correct branch, clean starting tree, and `d823256` present. |
 | Code Pilot Candidate | PASS | Phase 2G baseline retained; safe-diagnostics approved offline regression passed 913 tests. Existing frontend build remains unchanged. |
 | Existing harness review | DEFECT CORRECTED | Old harness dropped a name-guarded DB before proving it empty/owned and covered only one partial index. It now requires explicit disposable confirmation, refuses nonempty DBs, derives its plan from the manifest, and owns cleanup. |
 | Index manifest dry review | PASS | Authoritative manifest only; machine-readable plan available with `verify_real_mongo.py --plan --json`. Duplicate identity/direction validation is offline tested. |
-| Real-Mongo safety guard | PASS (code); NOT EXECUTED (environment) | No fallback; test/staging APP_ENV only; disposable name; explicit no-customer/disposable confirmation; initial emptiness required. |
-| Disposable Mongo | REACHABLE; CERTIFICATION RERUN PENDING | Operator execution confirmed Railway Mongo connectivity and authentication. MongoDB server version was manually observed as 8.0.28. The first certification run failed with bounded `OperationFailure`; v1 diagnostics did not identify its exact stage. Safe stage/index/code instrumentation is now added; do not infer an index or concurrency defect until rerun evidence identifies the boundary. |
-| Index application/unique/partial semantics | NOT EXECUTED | Requires guarded disposable Mongo. Harness covers email policy, Action Center recurrence, execution history, operation null/missing key semantics, invoice/package authority. |
-| Mongo topology/sessions/transactions | UNKNOWN / NOT EXECUTED | Harness uses server `hello`; transaction commit/abort runs only for session-capable replica-set/sharded topology. |
-| Pilot UoW mode | DURABLE_SAGA | Phase 2B default is explicit durable saga; observed transaction support will not auto-enable transactional mode. |
-| Real concurrency | NOT EXECUTED | Harness covers Action Center identity, atomic outbox lease/stale-finalize, operation idempotency, invoice claim, active execution authority. No exactly-once external-side-effect claim. |
-| Cleanup | SAFETY RULE PRESERVED | This diagnostic change made no DB access. The harness may drop only a target proven empty and claimed by that run; failure after ownership still performs bounded cleanup. |
+| Real-Mongo safety guard | PASS | Operator run used the explicit disposable certification database; no production fallback or customer data. |
+| Disposable real Mongo | PASS — CLOSED | Successful Railway run; `DISPOSABLE_TEST`; MongoDB 8.0.28. |
+| Index manifest / P0 indexes | PASS — CLOSED | Plan passed; 49 intended indexes verified; none missing or mismatched. Manifest unchanged. |
+| Unique and partial semantics | PASS — CLOSED | Representative protected behavior matched current manifest policy. |
+| Mongo topology | STANDALONE — CLOSED | Actual topology characterized. |
+| Sessions | SUPPORTED — CLOSED | Actual server capability known. |
+| Transactions | UNSUPPORTED_TOPOLOGY — CLOSED AS CHARACTERIZED | Not a transaction pass; no transactional atomicity claim. |
+| Pilot UoW mode | DURABLE_SAGA — CLOSED | Explicit mode compatible with the standalone topology. |
+| Real concurrency | PASS — CLOSED | Exactly one authority/lease winner per bounded probe; stale outbox finalization rejected. |
+| Cleanup | PASS — CLOSED | `OWNED_DISPOSABLE_DATABASE_DROPPED`. |
 | Staging configuration/JWT/CORS/seed | DEFINED / UNVERIFIED | Contract is in `STAGING_DEPLOYMENT_CHECKLIST.md`; actual staging values/behavior not available. Secret values must never enter this report. |
 | Document storage | LOCAL, SINGLE-HOST PILOT ONLY | Acceptable only with a restricted persistent volume and single instance. Restart/redeploy durability is UNKNOWN and mandatory. |
 | Deployment availability | UNAVAILABLE | No authorized staging connection and no Railway/Docker/Procfile/Nixpacks deployment definition found. STAGING DEPLOYMENT REQUIRES OPERATOR ACTION. |
@@ -33,7 +58,7 @@ Environment identity: Railway `mongo-certifier` connectivity context (non-secret
 | Backup/document backup/restore/audit | NOT EXECUTED | Separate disposable restore target and validation procedure defined. |
 | RPO/RTO | UNKNOWN | Targets: 24 hours / 8 hours. Durations and data-loss window unmeasured. |
 | Performance smoke/observability | NOT EXECUTED | Bounded endpoints and request-ID test defined. |
-| Pilot readiness evaluator | BLOCKED | Evaluator now requires actual deployment, Mongo, concurrency, durability, recovery, integrity, and behavioral evidence. |
+| Pilot readiness evaluator | BLOCKED | Mongo evidence is complete; deployment, durability, recovery, integrity, and behavioral evidence remain mandatory. |
 | Python syntax | PASS | `compileall -q app scripts tests` using an isolated bytecode cache. |
 | Backend regression | PASS | 913 passed, 6 deprecation warnings after safe diagnostic instrumentation. |
 | Frontend build | PASS | Optimized Create React App production build compiled successfully. |
@@ -44,13 +69,15 @@ Environment identity: Railway `mongo-certifier` connectivity context (non-secret
 
 P0: none discovered in offline preparation. Any inability to prove the external target is non-production/customer-free becomes P0 and stops execution.
 
-P1: disposable Mongo/index/topology/session/transaction/concurrency evidence; isolated deployment; strong staging JWT; behavioral CORS/auth; persistent document durability; backend/frontend health; deployed synthetic Golden Flow; document isolation; backup/restore/audit verification; staging integrity scan; readiness result; post-change CI confirmation.
+Closed Mongo-related P1 gates: disposable real Mongo, intended indexes, topology, sessions, transaction capability characterization, explicit UoW mode, representative concurrency, and cleanup.
+
+Open P1 gates: isolated backend deployment; staging JWT; exact CORS configuration and behavioral test; safe seed behavior; persistent document storage; restart/redeploy document persistence; frontend deployment; deployed health/auth verification; synthetic staging Golden Freight Flow; production-integrity scan; Mongo/data and document backups; restore drill; restored hash/audit verification; final pilot-readiness evaluation; and post-change CI confirmation.
 
 P2: local document storage remains a single-host operational constraint; transaction mode remains durable saga even if topology supports transactions; smoke timings are not benchmark/load certification.
 
 ## Access and scope attestations
 
-- Production database accessed: NO.
+- Production database accessed: NO (operator-observed report and this documentation update).
 - Customer data accessed: NO.
 - External deployment performed: NO.
 - External provider submission performed: NO.
@@ -60,8 +87,8 @@ P2: local document storage remains a single-host operational constraint; transac
 
 ## Exact next operator input
 
-1. Place the explicitly disposable Mongo URI, disposable database name, and confirmation in the operator environment/secret manager (not chat): `METAPHORA_TEST_MONGO_URI`, `METAPHORA_TEST_MONGO_DB`, `METAPHORA_TEST_MONGO_DISPOSABLE_CONFIRMED=true`, with `APP_ENV=staging`.
-2. Identify an already-authorized, provably isolated staging backend service and frontend host/origin.
-3. Confirm a single-instance persistent document volume and its backup mechanism; otherwise document workflows keep staging blocked.
+1. Identify an already-authorized, isolated Metaphora staging backend service and frontend host/origin; neither has been deployed.
+2. Configure staging JWT, exact CORS, safe seed behavior, and a persistent document volume without tracking secrets.
+3. Execute deployment, behavioral/E2E, persistence, integrity, backup/restore, and final readiness gates.
 
-Current verdict: **CONTROLLED STAGING NOT READY**. Mandatory environment gates remain unexecuted.
+Current verdict: **CONTROLLED STAGING NOT READY**. Mongo certification is complete, but mandatory application deployment and recovery gates remain. **CUSTOMER PILOT READY: NOT EVALUATED.**
