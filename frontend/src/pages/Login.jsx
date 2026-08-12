@@ -4,17 +4,6 @@ import { useAuth } from "../lib/auth";
 import { Command, ArrowRight, TrendingUp, ShieldCheck, Zap } from "lucide-react";
 import { toast, Toaster } from "sonner";
 
-const ROLES = [
-  { v: "owner", l: "Owner / Director" },
-  { v: "operations", l: "Operations Manager" },
-  { v: "dispatcher", l: "Dispatcher" },
-  { v: "safety", l: "Safety Manager" },
-  { v: "compliance", l: "Compliance Manager" },
-  { v: "finance", l: "Finance / Billing" },
-  { v: "admin", l: "Admin" },
-  { v: "driver", l: "Driver" },
-];
-
 export default function Login() {
   const { login, signup } = useAuth();
   const nav = useNavigate();
@@ -22,7 +11,7 @@ export default function Login() {
   const [busy, setBusy] = useState(false);
 
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
-  const [signupForm, setSignupForm] = useState({ name: "", email: "", password: "", role: "dispatcher" });
+  const [signupForm, setSignupForm] = useState({ name: "", email: "", password: "" });
 
   const doLogin = async (e) => {
     e.preventDefault();
@@ -39,12 +28,12 @@ export default function Login() {
 
   const doSignup = async (e) => {
     e.preventDefault();
-    const { name, email, password, role } = signupForm;
+    const { name, email, password } = signupForm;
     if (!name || !email || !password) { toast.error("Name, email, and password required"); return; }
-    if (password.length < 6) { toast.error("Password must be at least 6 characters"); return; }
+    if (password.length < 12) { toast.error("Password must be at least 12 characters"); return; }
     setBusy(true);
     try {
-      await signup({ name, email, password, role });
+      await signup({ name, email, password, role: "viewer" });
       toast.success("Account created — welcome to Metaphora");
       nav("/");
     } catch (err) {
@@ -153,7 +142,7 @@ export default function Login() {
             </>
           ) : (
             <>
-              <div className="font-mono text-[10px] uppercase tracking-widest mb-1" style={{color:"var(--text-3)"}}>// New Operator</div>
+              <div className="font-mono text-[10px] uppercase tracking-widest mb-1" style={{color:"var(--text-3)"}}>// New Viewer Account</div>
               <h2 className="text-2xl font-display font-bold mb-4">Create your account</h2>
               <form onSubmit={doSignup} className="space-y-3">
                 <Field label="Full Name">
@@ -176,18 +165,9 @@ export default function Login() {
                   <input
                     data-testid="signup-password" type="password" autoComplete="new-password"
                     value={signupForm.password} onChange={(e)=>setSignupForm({...signupForm, password: e.target.value})}
-                    placeholder="min 6 characters"
+                    placeholder="minimum 12 characters"
                     className="metaphora-input"
                   />
-                </Field>
-                <Field label="Role">
-                  <select
-                    data-testid="signup-role"
-                    value={signupForm.role} onChange={(e)=>setSignupForm({...signupForm, role: e.target.value})}
-                    className="metaphora-input"
-                  >
-                    {ROLES.map(r => <option key={r.v} value={r.v}>{r.l}</option>)}
-                  </select>
                 </Field>
                 <button type="submit" disabled={busy} data-testid="signup-submit-btn"
                   className="w-full btn-primary rounded px-4 py-2.5 font-medium text-sm flex items-center justify-center gap-2 transition-colors">
