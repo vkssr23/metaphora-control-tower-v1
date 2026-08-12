@@ -104,7 +104,7 @@
     "qs": "6.15.2",
     "diff": "4.0.4",
     "follow-redirects": "1.16.0",
-    "path-to-regexp": "0.1.13",
+    "react-scripts/webpack-dev-server/express/path-to-regexp": "0.1.13",
     "rollup": "2.80.0",
     "underscore": "1.13.8",
     "@babel/plugin-transform-modules-systemjs": "7.29.4",
