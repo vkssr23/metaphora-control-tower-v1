@@ -8,6 +8,8 @@ from app.domain.party_verification import DOMAINS, now, snapshots, evaluate, ass
 from app.schemas.party_verification import CaseCreate,CaseUpdate,EmptyAction,ReasonAction,ReviewUpdate,FindingUpdate,EvidenceAdd,ReviewDomain,ReviewResult,FindingResolution
 from app.execution_invalidation import preinvalidate_for_load
 from app.pickup_release_invalidation import preinvalidate_pickup_release
+from app.runtime import settings
+from app.infrastructure import party_verification_client
 
 ADMIN={"owner","admin"}; OPS=ADMIN|{"operations","dispatcher"}; DOMAIN_ROLES={"broker_identity":OPS,"shipper_identity":OPS,"contact_validation":OPS|{"finance"},"pickup_instructions":OPS,"carrier_authority":ADMIN|{"safety","compliance"},"insurance_evidence":ADMIN|{"safety","compliance","finance"},"fraud_risk":ADMIN|{"safety","compliance","finance"}}
 ALLOWED={"draft":{"review_pending"},"review_pending":{"findings_open","cleared","blocked"},"findings_open":{"review_pending","cleared","blocked"},"blocked":{"review_pending"},"cleared":{"expired","revoked"},"expired":{"review_pending"},"revoked":{"review_pending"}}
@@ -102,7 +104,7 @@ def register_party_verification_routes(api,db,get_current_user):
     async def refresh(cid:str,data:EmptyAction,user=Depends(get_current_user)): return await refresh_case(cid,user,"party_verification.snapshots_refreshed")
     @api.post("/party-verification-cases/{cid}/evaluate")
     async def evaluate_case(cid:str,data:EmptyAction,user=Depends(get_current_user)):
-        role(user,OPS|{"safety","compliance","finance"}); c=await one(db,user,cid); mutable(c,"evaluate"); load,p,rate,docs,tenant=await related(db,user,c["load_id"]); fs,risk=evaluate(c,load,rate); target="findings_open" if c["status"]=="review_pending" and any(f["status"]=="open" for f in fs) else c["status"]; u={"findings":fs,"risk_signals":risk["signals"],"risk_summary":risk,"unresolved_finding_ids":[f["id"] for f in fs if f["status"]=="open"],"blocking_reasons":risk["blocking_reasons"],"status":target}; a=await begin_audit(db.audit_events,user,"party_verification.evaluated",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["findings","risk_summary","status","version"],previous=c); return await replace(db,a,user,c,u)
+        role(user,OPS|{"safety","compliance","finance"}); c=await one(db,user,cid); mutable(c,"evaluate"); load,p,rate,docs,tenant=await related(db,user,c["load_id"]); vr=await party_verification_client.fetch_broker_verification(settings,rate); fs,risk=evaluate(c,load,rate,vr); target="findings_open" if c["status"]=="review_pending" and any(f["status"]=="open" for f in fs) else c["status"]; u={"findings":fs,"risk_signals":risk["signals"],"risk_summary":risk,"unresolved_finding_ids":[f["id"] for f in fs if f["status"]=="open"],"blocking_reasons":risk["blocking_reasons"],"status":target}; a=await begin_audit(db.audit_events,user,"party_verification.evaluated",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["findings","risk_summary","status","version"],previous=c); return await replace(db,a,user,c,u)
     async def transition(cid,user,target,action,reason="",observed=None,audit=None):
         c=observed or await one(db,user,cid)
         if target not in ALLOWED.get(c["status"],set()): raise HTTPException(409,f"Transition from {c['status']} to {target} is not allowed")
@@ -135,7 +137,7 @@ def register_party_verification_routes(api,db,get_current_user):
         role(user,ADMIN); c=await one(db,user,cid)
         if c["status"] not in {"review_pending","findings_open"}: raise HTTPException(409,"Case cannot be cleared from its current status")
         a=await begin_audit(db.audit_events,user,"party_verification.cleared",AuditEntityType.PARTY_VERIFICATION_CASE,cid,changed_fields=["status","version"],previous=c)
-        c=await one(db,user,cid); load,p,rate,docs,tenant=await related(db,user,c["load_id"]); fs,risk=evaluate(c,load,rate); incomplete=[d for d in DOMAINS if c.get("reviews",{}).get(d,{}).get("result") in {None,"pending","mismatch","insufficient_evidence","expired","blocked"}]
+        c=await one(db,user,cid); load,p,rate,docs,tenant=await related(db,user,c["load_id"]); vr=await party_verification_client.fetch_broker_verification(settings,rate); fs,risk=evaluate(c,load,rate,vr); incomplete=[d for d in DOMAINS if c.get("reviews",{}).get(d,{}).get("result") in {None,"pending","mismatch","insufficient_evidence","expired","blocked"}]
         b,s,ca,ins,cv,pi=snapshots(load,p,rate,docs,tenant); drift=any(c.get(k)!=(v) for k,v in (("broker_snapshot",b),("shipper_snapshot",s),("carrier_snapshot",ca),("insurance_evidence_snapshot",ins),("contact_validation_snapshot",cv),("pickup_instruction_snapshot",pi)))
         blockers=[]
         if incomplete: blockers.append("required_review_domain_incomplete")

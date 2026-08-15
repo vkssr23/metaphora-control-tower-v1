@@ -73,3 +73,62 @@ def test_material_mapping_and_invalidation_plans_are_deterministic():
 def test_status_guards_and_rate_requirement():
     assert not assert_mutable("cleared","evaluate") and assert_mutable("draft","evaluate") and not assert_mutable("expired","evidence")
     assert rate_confirmation_required([{"doc_type":"rate_con"}]) and not rate_confirmation_required([{"doc_type":"insurance"}])
+
+# --- Phase 6: Metaphora Verify broker-authority integration -----------------
+
+def test_verify_result_none_adds_no_verify_findings():
+    findings,_=evaluate(case(),LOAD,RATE)
+    assert not any(f["type"].startswith("verify_broker_") for f in findings)
+
+def test_verify_unavailable_is_informational_and_non_blocking():
+    findings,_=evaluate(case(),LOAD,RATE,{"status":"unavailable"})
+    f=next(x for x in findings if x["type"]=="verify_broker_check_unavailable")
+    assert f["severity"]=="info" and f["blocking"] is False
+
+def test_verify_mc_not_found_is_high_and_blocking():
+    findings,_=evaluate(case(),LOAD,RATE,{"status":"not_found"})
+    f=next(x for x in findings if x["type"]=="verify_broker_mc_not_found")
+    assert f["severity"]=="high" and f["blocking"] is True
+
+def test_verify_authority_and_bond_gaps_are_blocking():
+    vr={"status":"ok","broker_authority_status":"I","bond_insurance_required":"Y",
+        "bond_insurance_on_file":"N","risk_level":"Yellow","flags":[]}
+    findings,_=evaluate(case(),LOAD,RATE,vr)
+    types={f["type"] for f in findings}
+    assert {"verify_broker_authority_inactive","verify_broker_bond_not_on_file","verify_broker_risk_yellow"}<=types
+    for t in ("verify_broker_authority_inactive","verify_broker_bond_not_on_file"):
+        assert next(f for f in findings if f["type"]==t)["blocking"] is True
+    assert next(f for f in findings if f["type"]=="verify_broker_risk_yellow")["blocking"] is False
+
+def test_verify_shared_contact_flags_map_to_severity():
+    revoked_vr={"status":"ok","broker_authority_status":"A","bond_insurance_required":"N",
+                "bond_insurance_on_file":"N","risk_level":"Red",
+                "flags":[{"code":"SHARED_CONTACT_REVOKED_ENTITY","message":"Shares phone with a revoked entity."}]}
+    findings,risk=evaluate(case(),LOAD,RATE,revoked_vr)
+    f=next(x for x in findings if x["type"]=="verify_broker_shared_contact_revoked_entity")
+    assert f["severity"]=="critical" and f["blocking"] is True and risk["risk_level"]=="critical"
+
+    other_vr={**revoked_vr,"flags":[{"code":"SHARED_CONTACT_OTHER_ENTITY","message":"Shares an address with another entity."}]}
+    findings2,_=evaluate(case(),LOAD,RATE,other_vr)
+    f2=next(x for x in findings2 if x["type"]=="verify_broker_shared_contact_other_entity")
+    assert f2["severity"]=="warning" and f2["blocking"] is False
+
+def test_verify_findings_carry_forward_resolution_like_internal_findings():
+    c=case()
+    c["findings"]=[{"type":"verify_broker_authority_inactive","domain":"broker_identity","status":"waived",
+                     "resolution":"accepted_internal_value","resolution_reason":"ok for now",
+                     "resolved_at":"2026-01-01","resolved_by":"u1","resolved_by_role":"admin",
+                     "evidence_document_ids":[]}]
+    vr={"status":"ok","broker_authority_status":"I","bond_insurance_required":"N",
+        "bond_insurance_on_file":"N","risk_level":"Green","flags":[]}
+    findings,_=evaluate(c,LOAD,RATE,vr)
+    carried=next(x for x in findings if x["type"]=="verify_broker_authority_inactive")
+    assert carried["status"]=="waived" and carried["resolution"]=="accepted_internal_value"
+
+def test_same_verify_result_input_has_same_score_and_signals():
+    vr={"status":"ok","broker_authority_status":"I","bond_insurance_required":"N",
+        "bond_insurance_on_file":"N","risk_level":"Yellow","flags":[]}
+    first=evaluate(copy.deepcopy(case()),LOAD,RATE,copy.deepcopy(vr))[1]
+    second=evaluate(copy.deepcopy(case()),LOAD,RATE,copy.deepcopy(vr))[1]
+    for key in ("risk_level","risk_score","signal_count","blocking_signal_count","critical_signal_count","signals","blocking_reasons"):
+        assert first[key]==second[key]
