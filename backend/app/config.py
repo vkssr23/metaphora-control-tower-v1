@@ -76,6 +76,20 @@ class Settings:
     document_storage_backend: str = "local"
     document_storage_root: str = "./data/documents"
     document_max_upload_bytes: int = 15 * 1024 * 1024
+    # Metaphora Verify integration (Party Verification broker-authority
+    # check) — deliberately OPTIONAL and unvalidated at startup, unlike
+    # every field above. jwt_secret/cors_origins are security-critical: a
+    # missing/weak value there must stop the whole app from starting,
+    # because every route depends on them. This integration is an
+    # enhancement to one already-functional internal check (Party
+    # Verification degrades to its pre-integration, internal-only behavior
+    # when unset — see party_verification_client.is_configured()); an
+    # unrelated missing env var must never be able to take down every
+    # other route in Control Tower. If this integration later becomes
+    # load-bearing for a compliance requirement, revisit this decision.
+    metaphora_verify_base_url: str | None = None
+    metaphora_verify_service_key: str | None = None
+    metaphora_verify_timeout_seconds: float = 5.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -93,4 +107,7 @@ class Settings:
             document_storage_backend=backend,
             document_storage_root=os.environ.get("DOCUMENT_STORAGE_ROOT", "./data/documents"),
             document_max_upload_bytes=maximum,
+            metaphora_verify_base_url=(os.environ.get("METAPHORA_VERIFY_BASE_URL") or "").strip().rstrip("/") or None,
+            metaphora_verify_service_key=os.environ.get("METAPHORA_VERIFY_SERVICE_KEY") or None,
+            metaphora_verify_timeout_seconds=float(os.environ.get("METAPHORA_VERIFY_TIMEOUT_SECONDS", "5.0")),
         )

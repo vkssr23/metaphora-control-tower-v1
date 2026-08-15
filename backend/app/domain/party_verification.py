@@ -69,7 +69,7 @@ def snapshots(load,passport,rate,documents,tenant):
     insurance=[{"document_id":d["id"],"filename":d.get("filename","")[:255],"document_type":d.get("doc_type",""),"stated_effective_date":d.get("stated_effective_date","")[:64],"stated_expiration_date":d.get("stated_expiration_date","")[:64],"named_insured":d.get("named_insured","")[:200],"uploaded_at":d.get("uploaded_at"),"uploaded_by":d.get("uploaded_by")} for d in qualified_insurance_documents(documents)]
     pickup={k:load.get(k) for k in ("pickup_address","pickup_city","pickup_state","pickup_zip","pickup_appt","equipment_type","commodity","rate_con_number") if k in load}
     return broker,shipper,carrier,insurance,{"normalized_email":norm(broker.get("broker_contact_email")),"normalized_phone":phone(broker.get("broker_contact_phone")),"external_validation_performed":False},pickup
-def evaluate(case,load,rate):
+def evaluate(case,load,rate,verify_result=None):
     b=case.get("broker_snapshot",{}); s=case.get("shipper_snapshot",{}); c=case.get("carrier_snapshot",{}); ins=case.get("insurance_evidence_snapshot",[]); p=case.get("pickup_instruction_snapshot",{}); fields=(rate or {}).get("accepted_snapshot",{}).get("extracted_fields",{})
     fs=[]
     if not b.get("name"): fs.append(finding("missing_broker_identifier","broker_identity","high",True,"Broker identity data is incomplete"))
@@ -90,6 +90,38 @@ def evaluate(case,load,rate):
     for lf,rf,kind in (("pickup_address","pickup_address","pickup_address_mismatch"),("rate_con_number","pickup_number","pickup_number_mismatch"),("equipment_type","equipment_type","equipment_mismatch"),("commodity","commodity","commodity_mismatch")):
         if fields.get(rf) and norm(p.get(lf))!=norm(fields.get(rf)): fs.append(finding(kind,"pickup_instructions","high",True,f"{lf.replace('_',' ').title()} does not internally match",p.get(lf),fields.get(rf)))
     if not p.get("rate_con_number") and not fields.get("pickup_number"): fs.append(finding("missing_pickup_reference","pickup_instructions","warning",False,"Pickup reference is missing"))
+    # Phase 6: Metaphora Verify broker-authority/fraud-signal check.
+    # verify_result is pre-fetched (async, outside this pure function) by
+    # the route and passed in — same "domain stays pure, caller
+    # precomputes and injects" discipline used throughout this function
+    # already. Every finding type below is a static literal (never
+    # per-call-random) so the resolution-carry-forward below still works
+    # for these findings exactly as it does for every internal rule.
+    if verify_result is not None:
+        vstatus=verify_result.get("status")
+        if vstatus=="unavailable":
+            fs.append(finding("verify_broker_check_unavailable","broker_identity","info",False,"Metaphora Verify broker-authority check could not be completed for this evaluation; broker authority is not independently confirmed"))
+        elif vstatus=="not_found":
+            fs.append(finding("verify_broker_mc_not_found","broker_identity","high",True,"FMCSA has no record for the broker's stated MC number",b.get("broker_mc","")))
+        elif vstatus=="ok":
+            auth=verify_result.get("broker_authority_status")
+            if not auth:
+                fs.append(finding("verify_broker_authority_not_on_file","broker_identity","high",True,"FMCSA has no broker authority on file for this MC","none","A (active)"))
+            elif str(auth).upper()!="A":
+                fs.append(finding("verify_broker_authority_inactive","broker_identity","high",True,"Broker's FMCSA authority is on file but not active",auth,"A (active)"))
+            if (verify_result.get("bond_insurance_required") or "").upper()=="Y" and (verify_result.get("bond_insurance_on_file") or "").upper()!="Y":
+                fs.append(finding("verify_broker_bond_not_on_file","broker_identity","high",True,"Broker's required BMC-84/85 bond or trust fund is not on file with FMCSA",verify_result.get("bond_insurance_on_file") or "N","Y"))
+            level=verify_result.get("risk_level")
+            if level=="Red":
+                fs.append(finding("verify_broker_risk_red","fraud_risk","critical",True,"Metaphora Verify assessed this broker as high risk (Red)",level,"Green"))
+            elif level=="Yellow":
+                fs.append(finding("verify_broker_risk_yellow","fraud_risk","warning",False,"Metaphora Verify assessed this broker as elevated risk (Yellow)",level,"Green"))
+            for flag in verify_result.get("flags") or []:
+                code=flag.get("code")
+                if code=="SHARED_CONTACT_REVOKED_ENTITY":
+                    fs.append(finding("verify_broker_shared_contact_revoked_entity","fraud_risk","critical",True,flag.get("message","Shares contact information with a revoked entity")))
+                elif code=="SHARED_CONTACT_OTHER_ENTITY":
+                    fs.append(finding("verify_broker_shared_contact_other_entity","fraud_risk","warning",False,flag.get("message","Shares contact information with another entity")))
     resolved={(x.get("type"),x.get("domain")):x for x in case.get("findings",[]) if x.get("status") in {"resolved","waived"}}
     for f in fs:
         prior=resolved.get((f["type"],f["domain"]))
