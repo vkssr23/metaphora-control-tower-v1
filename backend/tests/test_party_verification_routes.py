@@ -3,6 +3,7 @@ import copy, pytest
 from fastapi import Header, HTTPException
 from fastapi.testclient import TestClient
 from test_rate_confirmation_routes import FakeDB, Collection, LOAD, DOC, USERS, TA, TB, h, extraction, resolved_rate_extraction, approved_passport, server
+import app.infrastructure.party_verification_client as party_verification_client
 USERS.setdefault("safety",{"id":"U-safe","email":"safe@example.test","name":"Safety","role":"safety","tenant_id":TA})
 
 def passport(tenant=TA):
@@ -161,8 +162,76 @@ def test_lists_are_tenant_scoped_bounded_sorted_and_no_delete(api):
     assert c.delete(f"/api/party-verification-cases/{first['id']}",headers=h("owner")).status_code==405
 
 def test_responses_contain_no_external_verification_claims(api):
+    # Metaphora Verify checks broker FMCSA authority status, BMC-84/85
+    # bond-on-file, and shared-contact fraud signals only — never
+    # identity, a live insurance POLICY (narrower than bond/trust-fund-
+    # on-file), fraud clearance, or document authenticity. None of these
+    # phrases become true post-integration; see
+    # test_evaluate_folds_verify_broker_findings_into_case below for what
+    # the integration DOES now truthfully surface.
     c,db=api; body=create(c).json(); text=str(body).lower()
     for forbidden in ("fmcsa verified","insurance verified","policy active","identity verified","fraud cleared","document authentic"): assert forbidden not in text
+
+async def _verify_red_flag(settings,rate):
+    return {"status":"ok","broker_authority_status":"I","bond_insurance_required":"Y",
+            "bond_insurance_on_file":"N","risk_level":"Red",
+            "flags":[{"code":"SHARED_CONTACT_REVOKED_ENTITY","message":"Shares phone with a revoked entity."}]}
+async def _verify_unavailable(settings,rate): return {"status":"unavailable"}
+
+def _with_broker_mc(db):
+    db.rate_confirmation_extractions.docs[0]["accepted_snapshot"]["extracted_fields"]["broker_mc"]="MC123"
+
+def test_evaluate_folds_verify_broker_findings_into_case(api,monkeypatch):
+    c,db=api; monkeypatch.setattr(party_verification_client,"fetch_broker_verification",_verify_red_flag)
+    _with_broker_mc(db); cid=create(c).json()["id"]
+    r=c.post(f"/api/party-verification-cases/{cid}/evaluate",json={},headers=h("ops")); assert r.status_code==200
+    body=r.json(); types={f["type"] for f in body["findings"]}
+    assert "verify_broker_shared_contact_revoked_entity" in types and "verify_broker_authority_inactive" in types
+    assert body["risk_summary"]["blocking_signal_count"]>=1
+    text=str(body).lower(); assert "fmcsa" in text
+    for forbidden in ("fmcsa verified","insurance verified","policy active","identity verified","fraud cleared","document authentic"): assert forbidden not in text
+
+def test_evaluate_verify_unavailable_is_informational_not_blocking(api,monkeypatch):
+    c,db=api; monkeypatch.setattr(party_verification_client,"fetch_broker_verification",_verify_unavailable)
+    _with_broker_mc(db); cid=create(c).json()["id"]
+    r=c.post(f"/api/party-verification-cases/{cid}/evaluate",json={},headers=h("ops")); assert r.status_code==200
+    body=r.json(); f=next(x for x in body["findings"] if x["type"]=="verify_broker_check_unavailable")
+    assert f["severity"]=="info" and f["blocking"] is False
+    assert "verify_broker_check_unavailable" not in body["risk_summary"]["blocking_reasons"]
+
+def test_clear_is_blocked_by_verify_sourced_critical_finding(api,monkeypatch):
+    # /clear's 409 detail carries blocker CATEGORIES (e.g.
+    # "unresolved_critical_signal"), not individual finding types — the
+    # specific verify_broker_* type is proven separately via /evaluate's
+    # own findings list (test_evaluate_folds_verify_broker_findings_into_case).
+    # This test proves the Verify-sourced critical finding actually
+    # reaches and gates /clear's blocker computation end-to-end.
+    c,db=api; monkeypatch.setattr(party_verification_client,"fetch_broker_verification",_verify_red_flag)
+    _with_broker_mc(db); cid=_reviewable(c,db)
+    r=c.post(f"/api/party-verification-cases/{cid}/clear",json={},headers=h("owner"))
+    assert r.status_code==409
+    reasons=r.json()["detail"]["blocking_reasons"]
+    assert "unresolved_blocking_finding" in reasons and "unresolved_critical_signal" in reasons
+
+def test_evaluate_still_calls_verify_client_when_broker_mc_absent(api,monkeypatch):
+    c,db=api; calls=[]
+    async def _counting(settings,rate):
+        calls.append(rate); return None
+    monkeypatch.setattr(party_verification_client,"fetch_broker_verification",_counting)
+    cid=create(c).json()["id"]
+    r=c.post(f"/api/party-verification-cases/{cid}/evaluate",json={},headers=h("ops")); assert r.status_code==200
+    assert len(calls)==1
+    assert not any(f["type"].startswith("verify_broker_") for f in r.json()["findings"])
+
+def test_evaluate_with_verify_not_configured_degrades_silently(api):
+    # No monkeypatch of the client at all — Settings has no
+    # METAPHORA_VERIFY_BASE_URL/SERVICE_KEY in this test process, so
+    # fetch_broker_verification's own is_configured() check short-circuits
+    # to None before any network attempt. Proves the real (unmocked)
+    # degrade path works end-to-end through the actual route.
+    c,db=api; _with_broker_mc(db); cid=create(c).json()["id"]
+    r=c.post(f"/api/party-verification-cases/{cid}/evaluate",json={},headers=h("ops")); assert r.status_code==200
+    assert not any(f["type"].startswith("verify_broker_") for f in r.json()["findings"])
 
 def test_load_failure_after_material_invalidation_stays_conservative(api):
     c,db=api; create(c); db.party_verification_cases.docs[0]["status"]="cleared"; p=db.load_passports.docs[0]; p.update({"status":"approved","pickup_authorization":{"status":"active"}}); db.loads.fail_update=True
