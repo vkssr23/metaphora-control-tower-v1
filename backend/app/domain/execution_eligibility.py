@@ -59,7 +59,20 @@ def evaluate_prerequisites(load,passport,party,rate):
     if not party_current: blockers.append("party_verification_required")
     if not rate_current: blockers.append("accepted_rate_confirmation_required")
     return {"party_required":PARTY_VERIFICATION_REQUIRED,"party_current":party_current,"rate_confirmation_required":RATE_CONFIRMATION_REQUIRED,"rate_confirmation_current":rate_current,"blockers":blockers,"warnings":[],"prerequisite_check_results":{"required_party_clearance":"pass" if party_current else "fail","required_rate_confirmation":"pass" if rate_current else "fail"}}
-def evaluate(load,driver,truck,case,passport,party,rate):
+def truck_equipment_result(vehicle_verification):
+    """vehicle_verification is pre-fetched (async, outside this pure
+    function) by the route and passed in — same discipline as
+    party_verification.py's verify_result. None = not configured/not
+    attempted (identical to today's always-insufficient_data behavior);
+    a dict with status != "ok" = configured but the call itself failed."""
+    if not vehicle_verification:
+        return "insufficient_data",""
+    if vehicle_verification.get("status")!="ok": return "insufficient_data","vehicle_verification_unavailable"
+    if not vehicle_verification.get("vin_valid_checksum"): return "fail","vin_check_digit_invalid"
+    if not vehicle_verification.get("plausible_freight_vehicle"): return "fail","vehicle_type_not_freight_appropriate"
+    if vehicle_verification.get("risk_level")=="Yellow": return "warning","vehicle_decode_partial_or_unusual"
+    return "pass",""
+def evaluate(load,driver,truck,case,passport,party,rate,vehicle_verification=None):
     manual={c["type"]:c for c in case.get("checks",[]) if c.get("source")=="manual"}
     nonwaivable={"driver_assignment","truck_assignment","required_party_clearance","required_rate_confirmation","required_load_passport_state"}
     def ck(kind,result,reason=""):
@@ -78,7 +91,7 @@ def evaluate(load,driver,truck,case,passport,party,rate):
       ck("cdl_administrative_status",expiry_result(driver.get("cdl_expiry")) if driver else "fail"),ck("medical_card_administrative_status",expiry_result(driver.get("medical_expiry")) if driver else "fail"),
       ck("mvr_administrative_status",administrative_result("mvr",driver.get("mvr_status")) if driver else "fail"),ck("clearinghouse_administrative_status",administrative_result("clearinghouse",driver.get("clearinghouse_status")) if driver else "fail"),ck("employment_verification_status",administrative_result("employment",driver.get("employment_verification")) if driver else "fail"),
       ck("truck_assignment","pass" if assigned_truck else "fail"),ck("truck_operational_status",truck_operational(truck.get("status")) if truck else "fail"),ck("truck_maintenance_condition",administrative_result("maintenance",truck.get("maintenance_status")) if truck else "fail"),ck("truck_insurance_evidence",expiry_result(truck.get("insurance_expiry")) if truck else "fail"),
-      ck("truck_equipment_compatibility","insufficient_data"),ck("trailer_identifier","pass" if (not trailer_required or case.get("trailer_snapshot",{}).get("identifier")) else "fail"),ck("trailer_equipment_compatibility",equipment_compatibility(required,trailer_type) if trailer_required else "pass"),
+      ck("truck_equipment_compatibility",*truck_equipment_result(vehicle_verification)),ck("trailer_identifier","pass" if (not trailer_required or case.get("trailer_snapshot",{}).get("identifier")) else "fail"),ck("trailer_equipment_compatibility",equipment_compatibility(required,trailer_type) if trailer_required else "pass"),
       ck("load_weight_fit","insufficient_data" if not load.get("weight") else "warning"),ck("commodity_equipment_fit","insufficient_data" if not load.get("commodity") else "warning"),ck("appointment_feasibility",appointment_result(load.get("pickup_appt"),load.get("delivery_appt"))),ck("hos_readiness",hos_result(case.get("hos_readiness_snapshot"))),ck("pickup_readiness","pass" if assigned_driver and assigned_truck else "fail"),
       ck("required_party_clearance",prerequisites["prerequisite_check_results"]["required_party_clearance"],"party_verification_required"),ck("required_rate_confirmation",prerequisites["prerequisite_check_results"]["required_rate_confirmation"],"accepted_rate_confirmation_required"),ck("required_load_passport_state","pass" if passport and passport.get("load_id")==load.get("id") else "fail")]
     v=verdict(checks); blocking=sorted(c.get("reason") or c["type"] for c in checks if c["result"] in {"fail","expired"}); warnings=sorted(c["type"] for c in checks if c["result"] in {"warning","insufficient_data","pending"})
