@@ -64,6 +64,36 @@ def test_prerequisites_are_policy_mandatory_and_fail_closed():
     current=evaluate_prerequisites(load,passport,party,rate)
     assert current["party_current"] and current["rate_confirmation_current"] and not current["blockers"]
     assert current==evaluate_prerequisites(load,passport,party,rate)
+def test_truck_equipment_result_no_verification_is_insufficient_data():
+    # Identical to today's always-insufficient_data behavior when the
+    # Metaphora Verify integration isn't configured/attempted at all.
+    assert truck_equipment_result(None)==("insufficient_data","")
+def test_truck_equipment_result_unavailable_status():
+    assert truck_equipment_result({"status":"unavailable"})==("insufficient_data","vehicle_verification_unavailable")
+def test_truck_equipment_result_invalid_checksum_fails():
+    assert truck_equipment_result({"status":"ok","vin_valid_checksum":False,"plausible_freight_vehicle":False,"risk_level":"Red"})==("fail","vin_check_digit_invalid")
+def test_truck_equipment_result_not_freight_appropriate_fails():
+    assert truck_equipment_result({"status":"ok","vin_valid_checksum":True,"plausible_freight_vehicle":False,"risk_level":"Red"})==("fail","vehicle_type_not_freight_appropriate")
+def test_truck_equipment_result_yellow_is_warning():
+    assert truck_equipment_result({"status":"ok","vin_valid_checksum":True,"plausible_freight_vehicle":True,"risk_level":"Yellow"})==("warning","vehicle_decode_partial_or_unusual")
+def test_truck_equipment_result_clean_passes():
+    assert truck_equipment_result({"status":"ok","vin_valid_checksum":True,"plausible_freight_vehicle":True,"risk_level":"Green"})==("pass","")
+def test_evaluate_without_vehicle_verification_arg_is_unaffected():
+    # Regression guard: the pre-existing 7-positional-arg call site (see
+    # test_deterministic_same_input_and_missing_assignments_block above)
+    # must keep behaving exactly as before Phase 7.
+    load={"id":"L","driver_id":None,"truck_id":None,"equipment_type":"Power Only"}; passport={"id":"P","load_id":"L","version":1}; case={"checks":[],"trailer_snapshot":{},"hos_readiness_snapshot":{}}
+    result=evaluate(load,None,None,case,passport,None,None)
+    truck_check=next(c for c in result["checks"] if c["type"]=="truck_equipment_compatibility")
+    assert truck_check["result"]=="insufficient_data"
+def test_evaluate_with_invalid_vin_blocks_truck_equipment_check():
+    load={"id":"L","driver_id":None,"truck_id":"T","equipment_type":"Power Only"}; passport={"id":"P","load_id":"L","version":1}; case={"checks":[],"trailer_snapshot":{},"hos_readiness_snapshot":{}}
+    truck={"id":"T","status":"Available"}
+    vr={"status":"ok","vin_valid_checksum":False,"plausible_freight_vehicle":False,"risk_level":"Red"}
+    result=evaluate(load,None,truck,case,passport,None,None,vr)
+    truck_check=next(c for c in result["checks"] if c["type"]=="truck_equipment_compatibility")
+    assert truck_check["result"]=="fail" and truck_check["reason"]=="vin_check_digit_invalid"
+    assert "vin_check_digit_invalid" in result["blocking_reasons"]
 def test_noncurrent_prerequisite_states_fail_closed():
     load={"id":"L"}; passport={"id":"P","version":1,"rate_confirmation":{"document_id":"D"}}
     for state in ("draft","review_pending","findings_open","blocked","expired","revoked"):
