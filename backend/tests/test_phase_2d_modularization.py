@@ -38,7 +38,7 @@ def _route_pairs():
 
 def test_route_method_path_parity_and_no_duplicates():
     pairs = _route_pairs()
-    assert len(pairs) == 173
+    assert len(pairs) == 174  # +1: POST /api/auth/metaphora/exchange (Metaphora Secure SSO handoff)
     assert len(pairs) == len(set(pairs))
     assert LEGACY_ROUTE_PAIRS <= set(pairs)
     assert {("POST","/api/documents/upload"),("GET","/api/documents/{document_id}/download")} <= set(pairs)

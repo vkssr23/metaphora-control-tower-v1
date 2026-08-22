@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-import os, logging, uuid, bcrypt, random, math, asyncio, re
+import os, logging, uuid, secrets, bcrypt, random, math, asyncio, re
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
@@ -33,6 +34,7 @@ from app.schemas import (
 from app.runtime import db, settings, now_iso, new_id, clean_doc, safe_db, audited_db
 from app.constants import DEFAULT_ASSUMPTIONS
 from app.schemas.tenants import TenantRecord, TenantStatus
+from app.infrastructure import verify_sso_client
 
 
 def register_auth_routes(public_api, api, get_current_user):
@@ -129,6 +131,82 @@ def register_auth_routes(public_api, api, get_current_user):
                 password_valid = False
         if not user or not password_valid:
             raise HTTPException(401, "Invalid credentials")
+        safe_user = public_user(user)
+        return {"token": create_token(safe_user, settings.jwt_secret), "user": safe_user}
+
+    class MetaphoraExchangeIn(BaseModel):
+        model_config = {"extra": "forbid"}
+        code: str
+
+    @public_api.post("/auth/metaphora/exchange")
+    async def metaphora_exchange(data: MetaphoraExchangeIn):
+        if not verify_sso_client.is_configured(settings):
+            raise HTTPException(503, "Metaphora Secure sign-in is not configured")
+        result = await verify_sso_client.redeem_sso_code(settings, data.code)
+        if result is None or result.get("status") != "ok":
+            raise HTTPException(400, "Sign-in link is invalid or has expired")
+
+        verify_org_id = str(result["org_id"])
+        timestamp = now_iso()
+        email = result["email"].strip().lower()
+
+        tenant = await db.tenants.find_one({"metaphora_org_id": verify_org_id})
+        # users.email is a GLOBAL unique index (not tenant-scoped). Check for
+        # a pre-existing Control-Tower-native account under an unrelated
+        # tenant BEFORE creating anything, so a collision never leaves an
+        # orphan tenant behind (a tenant is only ever created once we know
+        # this exchange will actually succeed).
+        existing_user = await db.users.find_one({"email": email})
+        if existing_user and (not tenant or existing_user.get("tenant_id") != tenant["id"]):
+            raise HTTPException(409, "An account with that email already exists under a different Metaphora Secure organization")
+
+        is_first_user_in_tenant = False
+        if not tenant:
+            candidate = TenantRecord(
+                id=new_tenant_id(), name=(result.get("org_name") or "Metaphora Workspace"),
+                status=TenantStatus.ACTIVE, created_at=timestamp, updated_at=timestamp,
+            ).model_dump(mode="json")
+            candidate["metaphora_org_id"] = verify_org_id
+            try:
+                await db.tenants.insert_one(candidate)
+            except DuplicateKeyError:
+                # Lost a race with a concurrent first-time SSO login for the
+                # same Verify org — use the tenant that won instead of
+                # erroring or creating a duplicate.
+                tenant = await db.tenants.find_one({"metaphora_org_id": verify_org_id})
+                if not tenant:
+                    raise HTTPException(500, "Tenant provisioning failed")
+            except Exception:
+                logging.error("Tenant create (metaphora sso) failed")
+                raise HTTPException(500, "Database operation failed")
+            else:
+                tenant = candidate
+                is_first_user_in_tenant = True
+                try:
+                    defaults = tenant_document({"tenant_id": tenant["id"]}, DEFAULT_ASSUMPTIONS)
+                    await safe_db(db.assumptions.insert_one(defaults), "tenant defaults create")
+                except HTTPException:
+                    logging.error("Metaphora SSO tenant defaults initialization failed")
+
+        user = existing_user
+        if not user:
+            display_name = email.split("@")[0] if "@" in email else email
+            user = {
+                "id": new_id("U"), "email": email, "name": display_name,
+                "role": "owner" if is_first_user_in_tenant else "viewer",
+                "tenant_id": tenant["id"],
+                "password": bcrypt.hashpw(secrets.token_urlsafe(32).encode(), bcrypt.gensalt()).decode(),
+                "created_at": now_iso(),
+            }
+            await safe_db(db.users.insert_one(user), "user create (metaphora sso)")
+            try:
+                audit = await begin_audit(db.audit_events, user, "tenant.metaphora_sso_user_created",
+                                           AuditEntityType.TENANT, tenant["id"], changed_fields=[],
+                                           source=AuditSource.SIGNUP)
+                await audit.succeeded({"id": user["id"]})
+            except HTTPException:
+                logging.warning("Metaphora SSO audit event could not be recorded")
+
         safe_user = public_user(user)
         return {"token": create_token(safe_user, settings.jwt_secret), "user": safe_user}
 
