@@ -1,54 +1,18 @@
-@import url('https://fonts.googleapis.com/css2?family=Chivo:wght@400;500;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* ============================================
-   METAPHORA CONTROL TOWER — COLOR SYSTEM
-   Dark: dark navy + graphite + white + electric green
-   Light: white + light gray + dark navy + electric green
-   ============================================ */
-
-:root, .light {
-  --bg: #F8FAFC;
-  --surface: #FFFFFF;
-  --surface-2: #F1F5F9;
-  --border: #E2E8F0;
-  --border-strong: #CBD5E1;
-  --text: #0B1220;
-  --text-2: #475569;
-  --text-3: #64748B;
-  --brand: #00D084;         /* electric green */
-  --brand-hover: #00B872;
-  --brand-soft: rgba(0, 208, 132, 0.10);
-  --accent: #1E40AF;        /* navy accent for links */
-  --warn: #F59E0B;
-  --danger: #EF4444;
-  --success: #10B981;
-  --info: #3B82F6;
-}
-
-.dark {
-  --bg: #070B14;            /* deep navy-black */
-  --surface: #0F1729;       /* dark navy */
-  --surface-2: #1A2438;     /* graphite */
-  --border: #1E293B;        /* graphite gray */
-  --border-strong: #334155;
-  --text: #F1F5F9;
-  --text-2: #94A3B8;
-  --text-3: #64748B;
-  --brand: #00E28A;         /* electric green */
-  --brand-hover: #00C878;
-  --brand-soft: rgba(0, 226, 138, 0.12);
-  --accent: #60A5FA;
-  --warn: #FBBF24;
-  --danger: #F87171;
-  --success: #34D399;
-  --info: #60A5FA;
-}
-
-/* Shadcn compat */
+/* Shadcn compat — kept for the (confirmed unused) components/ui/ library.
+   Ordered BEFORE the live Instrument theme below on purpose: this block and
+   the theme block both declare :root,.light / .dark, and originally this
+   one came SECOND in the file — which meant its HSL --border/--accent
+   silently won the cascade over the real theme tokens' hex values (same
+   selector, so plain source-order tie-break), leaving anything that used
+   var(--border)/var(--accent) directly (not wrapped in hsl()) resolving to
+   an invalid color. Moving it first — pure reorder, values untouched —
+   fixes that without touching the dead library itself. */
 :root, .light {
   --background: 210 40% 98%; --foreground: 222 47% 7%;
   --card: 0 0% 100%; --card-foreground: 222 47% 7%;
@@ -56,9 +20,8 @@
   --primary: 158 100% 41%; --primary-foreground: 0 0% 100%;
   --secondary: 214 32% 91%; --secondary-foreground: 222 47% 7%;
   --muted: 214 32% 91%; --muted-foreground: 215 16% 47%;
-  --accent: 214 32% 91%; --accent-foreground: 222 47% 7%;
   --destructive: 0 84% 60%; --destructive-foreground: 0 0% 100%;
-  --border: 214 32% 91%; --input: 214 32% 91%; --ring: 158 100% 41%;
+  --input: 214 32% 91%; --ring: 158 100% 41%;
   --radius: 0.4rem;
 }
 .dark {
@@ -68,96 +31,215 @@
   --primary: 158 100% 45%; --primary-foreground: 220 40% 6%;
   --secondary: 221 22% 20%; --secondary-foreground: 210 40% 96%;
   --muted: 221 22% 18%; --muted-foreground: 215 16% 60%;
-  --accent: 221 22% 20%; --accent-foreground: 210 40% 96%;
   --destructive: 0 84% 60%; --destructive-foreground: 0 0% 100%;
-  --border: 217 30% 17%; --input: 217 30% 17%; --ring: 158 100% 45%;
+  --input: 217 30% 17%; --ring: 158 100% 45%;
 }
 
-* { border-color: hsl(var(--border)); }
+/* ============================================
+   METAPHORA — "INSTRUMENT" DESIGN SYSTEM
+   Same tokens as design/tokens.css + design/primitives.css in the Verify
+   repo. Light is the new companion palette (Instrument's own spec/mockups
+   are dark-only) designed for this app's existing light/dark toggle.
+   ============================================ */
 
-html, body, #root { height: 100%; background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+:root, .light {
+  --bg:            #f7f4ee;
+  --bg-rail:       #f1ece2;
+  --bg-deep:       #eae2d3;
+  --bg-field:      #fbf8f3;
+  --surface:       #ffffff;
+  --surface-2:     #fbf8f3;
+  --surface-3:     #efe7d8;
 
-h1,h2,h3,h4,h5 { font-family: 'Chivo', sans-serif; font-weight: 700; letter-spacing: -0.02em; color: var(--text); }
-.font-mono, .mono { font-family: 'IBM Plex Mono', monospace; }
-.font-display { font-family: 'Chivo', sans-serif; }
+  --border:        #e6ddcb;
+  --border-strong: #d8caae;
+  --border-focus:  #c89a4f;
+  --border-muted:  #dcd0ba;
+  --border-faint:  #d3c6ac;
+  --hairline:      #eee7d9;
+
+  --text:          #221b10;
+  --text-2:        #5b5140;
+  --text-3:        #86795f;
+  --text-4:        #a79877;
+
+  --accent:        #f2a83d;
+  --accent-on:     #1a1206;
+  --accent-2:      #63bde6;
+  --ok:            #43c99b;
+  --danger-color:  #ef6250;
+  --neutral:       #8b93a3;
+  --accent-text:   #9c5e14;
+  --accent-2-text: #1d6fa0;
+  --ok-text:       #157a57;
+  --danger-text:   #b93a28;
+  --neutral-text:  #6b7385;
+
+  --grid-line:     #00000006;
+
+  /* legacy names this app's own CSS/components already reference —
+     aliased so the 19 not-yet-restyled pages inherit the new palette
+     automatically. Instrument has no color distinct from "accent" for
+     "warning" (amber already carries both roles in this direction), so
+     --warn intentionally equals --accent, not a separate hue. */
+  --brand:         var(--accent);
+  --brand-hover:   var(--accent-text);
+  --brand-soft:    rgba(var(--accent-rgb), 0.10);
+  --warn:          var(--accent);
+  --danger:        var(--danger-color);
+  --success:       var(--ok);
+  --info:          var(--accent-2);
+}
+
+.dark {
+  --bg:            #14171d;
+  --bg-rail:       #171b22;
+  --bg-deep:       #101319;
+  --bg-field:      #181c23;
+  --surface:       #1a1e26;
+  --surface-2:     #1c212a;
+  --surface-3:     #232935;
+
+  --border:        #262b34;
+  --border-strong: #2c323c;
+  --border-focus:  #3d4757;
+  --border-muted:  #333944;
+  --border-faint:  #3a4150;
+  --hairline:      #21262f;
+
+  --text:          #eef0f4;
+  --text-2:        #a3aab8;
+  --text-3:        #6f7788;
+  --text-4:        #5c6474;
+
+  --accent:        #f2a83d;
+  --accent-on:     #1a1206;
+  --accent-2:      #63bde6;
+  --ok:            #43c99b;
+  --danger-color:  #ef6250;
+  --neutral:       #8b93a3;
+  --accent-text:   var(--accent);
+  --accent-2-text: var(--accent-2);
+  --ok-text:       var(--ok);
+  --danger-text:   var(--danger-color);
+  --neutral-text:  var(--neutral);
+
+  --grid-line:     #ffffff08;
+
+  --brand:         var(--accent);
+  --brand-hover:   var(--accent-text);
+  --brand-soft:    rgba(var(--accent-rgb), 0.12);
+  --warn:          var(--accent);
+  --danger:        var(--danger-color);
+  --success:       var(--ok);
+  --info:          var(--accent-2);
+}
+
+/* rgb triplets for alpha compositing — theme-independent (same hex in both
+   themes for fills, only the *-text variants differ) */
+:root {
+  --accent-rgb:   242, 168, 61;
+  --accent-2-rgb: 99, 189, 230;
+  --ok-rgb:       67, 201, 155;
+  --danger-rgb:   239, 98, 80;
+  --neutral-rgb:  111, 119, 136;
+
+  --font-ui:   'Archivo', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+
+  --r-chip:       5px;
+  --r-nav:        6px;
+  --r-control:    7px;
+  --r-control-lg: 8px;
+  --r-panel:      9px;
+  --r-panel-lg:   10px;
+  --r-mobile:     11px;
+  --r-mobile-lg:  14px;
+  --r-pill:       20px;
+
+  --h-toolbar:    34px;
+  --h-toolbar-sm: 32px;
+  --h-form:       48px;
+  --h-form-lg:    50px;
+  --h-mobile:     46px;
+  --h-mobile-lg:  54px;
+}
+
+* { border-color: var(--border); }
+
+html, body, #root { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-ui); -webkit-font-smoothing: antialiased; }
+
+h1,h2,h3,h4,h5 { font-family: var(--font-ui); font-weight: 700; letter-spacing: -0.02em; color: var(--text); }
+.font-mono, .mono { font-family: var(--font-mono); }
+.font-display { font-family: var(--font-ui); }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 
-/* Risk badges — Green / Yellow / Red — visible on both themes */
-.risk-Low, .risk-Green      { background: rgba(0, 208, 132, 0.12); color: #059669; border: 1px solid rgba(0, 208, 132, 0.4); }
-.dark .risk-Low, .dark .risk-Green { color: #34D399; }
-.risk-Medium, .risk-Yellow  { background: rgba(245, 158, 11, 0.14); color: #B45309; border: 1px solid rgba(245, 158, 11, 0.4); }
-.dark .risk-Medium, .dark .risk-Yellow { color: #FBBF24; }
-.risk-High, .risk-Red       { background: rgba(239, 68, 68, 0.14); color: #B91C1C; border: 1px solid rgba(239, 68, 68, 0.4); }
-.dark .risk-High, .dark .risk-Red { color: #F87171; }
-.risk-Critical              { background: rgba(220, 38, 38, 0.2); color: #DC2626; border: 1px solid #DC2626; animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-.dark .risk-Critical { color: #FCA5A5; }
+/* Risk badges — legacy names/shape kept for the 19 deferred pages, colors
+   remapped onto the Instrument signal tokens */
+.risk-Low, .risk-Green      { background: rgba(var(--ok-rgb), 0.12); color: var(--ok-text); border: 1px solid rgba(var(--ok-rgb), 0.4); }
+.risk-Medium, .risk-Yellow  { background: rgba(var(--accent-rgb), 0.14); color: var(--accent-text); border: 1px solid rgba(var(--accent-rgb), 0.4); }
+.risk-High, .risk-Red       { background: rgba(var(--danger-rgb), 0.14); color: var(--danger-text); border: 1px solid rgba(var(--danger-rgb), 0.4); }
+.risk-Critical              { background: rgba(var(--danger-rgb), 0.2); color: var(--danger-text); border: 1px solid var(--danger-color); animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
 
-.badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; font-family: 'IBM Plex Mono', monospace; font-weight: 600; border: 1px solid transparent; }
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: var(--r-chip); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; font-family: var(--font-mono); font-weight: 600; border: 1px solid transparent; }
 
 /* AI Decision badges */
-.decision-Book { background: rgba(0, 208, 132, 0.15); color: #059669; border: 1px solid #00D084; }
-.dark .decision-Book { color: #00E28A; }
-.decision-Negotiate { background: rgba(245, 158, 11, 0.15); color: #B45309; border: 1px solid #F59E0B; }
-.dark .decision-Negotiate { color: #FBBF24; }
-.decision-Reject { background: rgba(239, 68, 68, 0.15); color: #B91C1C; border: 1px solid #EF4444; }
-.dark .decision-Reject { color: #F87171; }
+.decision-Book { background: rgba(var(--ok-rgb), 0.15); color: var(--ok-text); border: 1px solid var(--ok); }
+.decision-Negotiate { background: rgba(var(--accent-rgb), 0.15); color: var(--accent-text); border: 1px solid var(--accent); }
+.decision-Reject { background: rgba(var(--danger-rgb), 0.15); color: var(--danger-text); border: 1px solid var(--danger-color); }
 
 /* Stage colors */
 .stage-Booked, .stage-Assigned, .stage-Dispatched, .stage-Pickup, .stage-Transit,
 .stage-Delivered, .stage-Docs, .stage-Invoice, .stage-Payment, .stage-Closed, .stage-Exception {
   background: var(--surface-2); color: var(--text-2); border-color: var(--border-strong);
 }
-.stage-Transit { background: rgba(0, 208, 132, 0.12); color: #059669; border-color: rgba(0, 208, 132, 0.5); }
-.dark .stage-Transit { color: #00E28A; }
-.stage-Delivered { background: rgba(59, 130, 246, 0.12); color: #1D4ED8; border-color: rgba(59,130,246,0.4); }
-.dark .stage-Delivered { color: #60A5FA; }
-.stage-Exception { background: rgba(239, 68, 68, 0.15); color: #B91C1C; border-color: #EF4444; }
-.dark .stage-Exception { color: #F87171; }
+.stage-Transit { background: rgba(var(--ok-rgb), 0.12); color: var(--ok-text); border-color: rgba(var(--ok-rgb), 0.5); }
+.stage-Delivered { background: rgba(var(--accent-2-rgb), 0.12); color: var(--accent-2-text); border-color: rgba(var(--accent-2-rgb), 0.4); }
+.stage-Exception { background: rgba(var(--danger-rgb), 0.15); color: var(--danger-text); border-color: var(--danger-color); }
 
-.terminal-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.terminal-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-panel-lg); }
 .terminal-card:hover { border-color: var(--border-strong); }
 
-.kpi-label { font-size: 10.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; font-family:'IBM Plex Mono', monospace; font-weight:500; }
-.kpi-value { font-family:'Chivo', sans-serif; font-weight:700; font-size:22px; letter-spacing:-0.02em; color: var(--text); }
+.kpi-label { font-size: 9.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 1.2px; font-family: var(--font-mono); font-weight: 500; }
+.kpi-value { font-family: var(--font-mono); font-weight: 700; font-size: 22px; letter-spacing: -0.02em; color: var(--text); }
 
-.sidebar-item { display:flex; align-items:center; gap:10px; padding:7px 12px; border-radius:6px; color: var(--text-2); font-size:13px; cursor:pointer; transition:all .15s; }
+.sidebar-item { display:flex; align-items:center; gap:10px; padding:0 8px; height: var(--h-toolbar); border-radius: var(--r-nav); color: var(--text-2); font-size:13px; cursor:pointer; transition:all .15s; }
 .sidebar-item:hover { background: var(--surface-2); color: var(--text); }
-.sidebar-item.active { background: var(--brand-soft); color: var(--brand); border-left:2px solid var(--brand); padding-left:10px; }
+.sidebar-item.active { background: var(--surface-3); color: #ffffff; font-weight: 500; box-shadow: inset 2px 0 0 var(--accent); }
 
 table.dispatch-table { width:100%; border-collapse:collapse; font-size:13px; }
-.dispatch-table thead th { position:sticky; top:0; background: var(--surface-2); color: var(--text-3); text-align:left; padding:8px 10px; font-family:'IBM Plex Mono',monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:0.08em; border-bottom:1px solid var(--border); }
-.dispatch-table tbody td { padding:8px 10px; border-bottom:1px solid var(--border); color: var(--text); font-family:'IBM Plex Mono',monospace; }
+.dispatch-table thead th { position:sticky; top:0; background: var(--surface-2); color: var(--text-4); text-align:left; padding:8px 10px; font-family: var(--font-mono); font-size:9px; text-transform:uppercase; letter-spacing:1.1px; border-bottom:1px solid var(--border); }
+.dispatch-table tbody td { padding:8px 10px; border-bottom:1px solid var(--hairline); color: var(--text); font-family: var(--font-mono); }
 .dispatch-table tbody tr:hover { background: var(--surface-2); }
 
-.btn-primary { background: var(--brand); color: #062B1B; font-weight: 600; }
-.btn-primary:hover { background: var(--brand-hover); }
-.dark .btn-primary { color: #062B1B; }
+.btn-primary { background: var(--accent); color: var(--accent-on); font-weight: 600; }
+.btn-primary:hover { background: var(--accent-text); }
 
-.text-brand { color: var(--brand); }
-.bg-brand { background: var(--brand); }
-.border-brand { border-color: var(--brand); }
+.text-brand { color: var(--accent-text); }
+.bg-brand { background: var(--accent); }
+.border-brand { border-color: var(--accent); }
 
 @keyframes pulse { 50% { opacity: 0.6; } }
 
 .gradient-hero {
   background:
-    radial-gradient(ellipse at top, rgba(0, 226, 138, 0.12), transparent 55%),
-    radial-gradient(ellipse at bottom right, rgba(59, 130, 246, 0.06), transparent 50%),
+    radial-gradient(ellipse at top, rgba(var(--accent-rgb), 0.12), transparent 55%),
+    radial-gradient(ellipse at bottom right, rgba(var(--accent-2-rgb), 0.06), transparent 50%),
     var(--bg);
 }
 
 /* Utility overrides for legacy classes */
-.text-sky-400, .text-sky-500 { color: var(--brand) !important; }
-.bg-sky-500 { background: var(--brand) !important; color: #062B1B !important; }
-.bg-sky-500:hover, .hover\:bg-sky-600:hover { background: var(--brand-hover) !important; }
-.border-sky-500, .hover\:border-sky-500:hover { border-color: var(--brand) !important; }
-.bg-sky-500\/10, .bg-sky-500\/20 { background: var(--brand-soft) !important; }
-.border-sky-500\/30, .border-sky-500\/40, .border-sky-500\/50 { border-color: var(--brand) !important; }
-.focus\:border-sky-500:focus { border-color: var(--brand) !important; }
+.text-sky-400, .text-sky-500 { color: var(--accent-text) !important; }
+.bg-sky-500 { background: var(--accent) !important; color: var(--accent-on) !important; }
+.bg-sky-500:hover, .hover\:bg-sky-600:hover { background: var(--accent-text) !important; }
+.border-sky-500, .hover\:border-sky-500:hover { border-color: var(--accent) !important; }
+.bg-sky-500\/10, .bg-sky-500\/20 { background: rgba(var(--accent-rgb), 0.1) !important; }
+.border-sky-500\/30, .border-sky-500\/40, .border-sky-500\/50 { border-color: var(--accent) !important; }
+.focus\:border-sky-500:focus { border-color: var(--accent) !important; }
 
 /* Input default */
 input, select, textarea { color: var(--text); }
@@ -176,3 +258,70 @@ input[type="text"], input[type="email"], input[type="password"], input[type="num
 .light .hover\:bg-zinc-800:hover, .light .hover\:bg-zinc-800\/50:hover { background: var(--surface-2) !important; }
 .light .bg-zinc-800\/50 { background: var(--surface-2) !important; }
 .light .bg-\[\#0A0A0C\], .light .bg-\[\#09090B\] { background: var(--bg) !important; }
+
+/* ---------------------------------------------------------------- */
+/* Instrument primitives — button, field, chip, panel, table row,
+   micro-label. New vocabulary for pages actively being restyled
+   (Login, Dashboard, and future passes); the legacy classes above stay
+   in place for the 19 pages not yet touched. */
+/* ---------------------------------------------------------------- */
+
+.micro-label {
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-3); line-height: 1;
+}
+.micro-label--section { font-size: 9px; letter-spacing: 1.1px; color: var(--text-4); }
+.micro-label--nano { font-size: 8.5px; letter-spacing: 0.8px; color: var(--text-4); }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; font-family: var(--font-ui);
+  cursor: pointer; white-space: nowrap; line-height: 1;
+}
+.btn svg { flex-shrink: 0; }
+.btn--toolbar { height: var(--h-toolbar); padding: 0 14px; gap: 7px; font-size: 12.5px; font-weight: 500; border-radius: var(--r-control); }
+.btn--form { height: var(--h-form-lg); padding: 0 16px; gap: 9px; font-size: 15px; font-weight: 600; border-radius: var(--r-control-lg); }
+.btn--primary { background: var(--accent); color: var(--accent-on); font-weight: 600; }
+.btn--form.btn--primary { box-shadow: 0 8px 26px rgba(var(--accent-rgb), 0.22); }
+.btn--toolbar.btn--primary { box-shadow: none; }
+.btn--danger { background: var(--danger-color); color: #1c0f0c; font-weight: 600; }
+.btn--outline { background: transparent; border-color: var(--border-strong); color: var(--text-2); font-weight: 400; }
+.btn--outline-muted { background: transparent; border-color: var(--border-muted); color: var(--text-2); font-weight: 400; }
+.btn--oauth {
+  height: var(--h-mobile); padding: 0 16px; gap: 10px; border-radius: var(--r-control-lg);
+  background: var(--surface-2); border-color: var(--border-strong); color: var(--text);
+  font-size: 14px; font-weight: 400;
+}
+
+.field { display: flex; flex-direction: column; gap: 7px; }
+.field__control {
+  display: flex; align-items: center; gap: 10px; height: var(--h-form); padding: 0 14px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-control-lg);
+  background: var(--bg); font-family: var(--font-ui); font-size: 14px; color: var(--text);
+}
+.field__control input { flex: 1; min-width: 0; border: 0; outline: none; background: none; font: inherit; color: inherit; }
+.field__control input::placeholder { color: var(--text-4); }
+.field__control:focus-within { border-color: var(--border-focus); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.11); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: var(--r-chip);
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.6px; line-height: 1.4; white-space: nowrap;
+}
+.chip--ok { background: rgba(var(--ok-rgb), 0.12); border: 1px solid rgba(var(--ok-rgb), 0.3); color: var(--ok-text); }
+.chip--accent { background: rgba(var(--accent-rgb), 0.12); border: 1px solid rgba(var(--accent-rgb), 0.3); color: var(--accent-text); }
+.chip--danger { background: rgba(var(--danger-rgb), 0.15); border: 1px solid rgba(var(--danger-rgb), 0.4); color: var(--danger-text); }
+.chip--neutral { background: rgba(var(--neutral-rgb), 0.14); border: 1px solid var(--border-muted); color: var(--neutral-text); }
+
+.dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px rgba(var(--ok-rgb), 0.85); }
+
+.panel { border: 1px solid var(--border); border-radius: var(--r-panel-lg); background: var(--surface); overflow: hidden; }
+.panel__header { height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600; }
+.panel__body { padding: 14px 15px; display: flex; flex-direction: column; gap: 12px; }
+.panel--stat { border-radius: var(--r-panel); padding: 15px 16px; display: flex; flex-direction: column; gap: 9px; }
+
+.table-row {
+  display: grid; grid-template-columns: var(--table-columns, 1fr); gap: 12px; align-items: center;
+  padding: 11px 16px; border-bottom: 1px solid var(--hairline); font-size: 12px; color: var(--text);
+}
+.table-row:last-child { border-bottom: none; }
+.table-row--header { padding: 9px 16px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 1.1px; text-transform: uppercase; color: var(--text-4); }
