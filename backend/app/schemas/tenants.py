@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import Field, field_validator
 
 from .common import StrictMutationModel, StringEnum
@@ -16,5 +18,9 @@ class TenantRecord(StrictMutationModel):
     status: TenantStatus
     created_at: str
     updated_at: str
+    # Metaphora Secure's org_id, as a string. Set only for tenants
+    # bootstrapped via the cross-product SSO handoff — None for every
+    # tenant created through ordinary public signup.
+    metaphora_org_id: Optional[str] = None
 
     _canonical_id = field_validator("id")(validate_tenant_id)

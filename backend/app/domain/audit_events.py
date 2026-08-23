@@ -18,7 +18,7 @@ ALLOWED_ACTIONS = {
     "load.created", "load.updated", "load.deleted", "load.stage_changed",
     "load.exception_entered", "load.exception_recovered", "document.created", "document.upload_started",
     "invoice.created", "invoice.updated", "assumptions.updated",
-    "alert.generated", "seed.executed", "tenant.signup_created",
+    "alert.generated", "seed.executed", "tenant.signup_created", "tenant.metaphora_sso_user_created",
     "load_passport.created", "load_passport.updated", "load_passport.checkpoint_updated",
     "load_passport.profitability_refreshed", "load_passport.submitted", "load_passport.approved",
     "load_passport.blocked", "load_passport.revoked", "load_passport.material_change_invalidated",

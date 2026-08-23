@@ -108,11 +108,16 @@ def as_role(role):
     server.app.dependency_overrides[server.get_current_user] = dependency
 
 
-def test_route_table_has_only_three_public_application_routes():
+def test_route_table_has_only_four_public_application_routes():
     expected_public = {
         ("GET", "/api/"),
         ("POST", "/api/auth/signup"),
         ("POST", "/api/auth/login"),
+        # Metaphora Secure SSO handoff: establishes a brand-new session from
+        # a code redeemed server-to-server against Verify, so it can carry
+        # no prior Control Tower credential of its own — same reason
+        # signup/login are unauthenticated.
+        ("POST", "/api/auth/metaphora/exchange"),
     }
     actual_public = set()
 
