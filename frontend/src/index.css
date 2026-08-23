@@ -258,6 +258,36 @@ input[type="text"], input[type="email"], input[type="password"], input[type="num
 .light .hover\:bg-zinc-800:hover, .light .hover\:bg-zinc-800\/50:hover { background: var(--surface-2) !important; }
 .light .bg-zinc-800\/50 { background: var(--surface-2) !important; }
 .light .bg-\[\#0A0A0C\], .light .bg-\[\#09090B\] { background: var(--bg) !important; }
+.bg-\[\#0A0A0C\], .bg-\[\#09090B\], .bg-\[\#0C0C0F\] { background: var(--bg) !important; }
+
+/* Literal Tailwind palette overrides — the 19 pages not otherwise touched
+   in this pass hardcode zinc/sky/emerald/amber/red/orange classes for
+   surface/text/semantic-tone rather than the token system (confirmed via
+   full-codebase grep: no other color families are used). Applied in BOTH
+   themes, not just .light like the block above — the dark values here
+   don't match the Instrument dark palette's exact hex either, so both
+   need normalizing, not just light-mode contrast fixes. !important to
+   reliably win over Tailwind's own utility specificity, matching the
+   sky-500 overrides' existing convention above. */
+.text-zinc-100, .text-zinc-200, .text-zinc-300 { color: var(--text) !important; }
+.text-zinc-400, .text-zinc-500, .text-zinc-600 { color: var(--text-3) !important; }
+.text-zinc-700 { color: var(--text-4) !important; }
+.bg-zinc-900, .bg-zinc-950 { background: var(--surface) !important; }
+.bg-zinc-800, .bg-zinc-700 { background: var(--surface-2) !important; }
+.border-zinc-800, .border-zinc-900, .border-zinc-950 { border-color: var(--border) !important; }
+.border-zinc-700 { border-color: var(--border-strong) !important; }
+
+.text-emerald-400, .text-emerald-500 { color: var(--ok-text) !important; }
+.bg-emerald-500 { background: var(--ok) !important; }
+.border-emerald-500 { border-color: var(--ok) !important; }
+
+.text-amber-300, .text-amber-400, .text-amber-500, .text-orange-400 { color: var(--accent-text) !important; }
+.bg-amber-500 { background: var(--accent) !important; }
+.border-amber-500 { border-color: var(--accent) !important; }
+
+.text-red-300, .text-red-400 { color: var(--danger-text) !important; }
+.bg-red-500 { background: var(--danger-color) !important; }
+.border-red-500 { border-color: var(--danger-color) !important; }
 
 /* ---------------------------------------------------------------- */
 /* Instrument primitives — button, field, chip, panel, table row,
