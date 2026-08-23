@@ -4,7 +4,7 @@ import Sidebar from "./Sidebar";
 
 export default function Shell() {
   return (
-    <div className="flex min-h-screen bg-[#09090B] text-zinc-100">
+    <div className="flex min-h-screen" style={{background:"var(--bg)", color:"var(--text)"}}>
       <Sidebar />
       <main className="flex-1 min-w-0">
         <Outlet />
