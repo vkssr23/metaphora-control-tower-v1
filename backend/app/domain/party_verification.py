@@ -104,13 +104,22 @@ def evaluate(case,load,rate,verify_result=None):
         elif vstatus=="not_found":
             fs.append(finding("verify_broker_mc_not_found","broker_identity","high",True,"FMCSA has no record for the broker's stated MC number",b.get("broker_mc","")))
         elif vstatus=="ok":
+            # Verify's canonical vocabulary (domain/compliance.py in that repo):
+            # broker_authority_status in {ACTIVE,INACTIVE,OUT_OF_SERVICE,NOT_AUTHORIZED,UNKNOWN};
+            # bond_insurance_required/on_file in {REQUIRED/NOT_REQUIRED,PRESENT/ABSENT}/UNKNOWN.
+            # UNKNOWN is a first-class "undisclosed" state there, never a negative — an
+            # unverified broker is a review task, not a violation, so it stays non-blocking here too.
             auth=verify_result.get("broker_authority_status")
-            if not auth:
-                fs.append(finding("verify_broker_authority_not_on_file","broker_identity","high",True,"FMCSA has no broker authority on file for this MC","none","A (active)"))
-            elif str(auth).upper()!="A":
-                fs.append(finding("verify_broker_authority_inactive","broker_identity","high",True,"Broker's FMCSA authority is on file but not active",auth,"A (active)"))
-            if (verify_result.get("bond_insurance_required") or "").upper()=="Y" and (verify_result.get("bond_insurance_on_file") or "").upper()!="Y":
-                fs.append(finding("verify_broker_bond_not_on_file","broker_identity","high",True,"Broker's required BMC-84/85 bond or trust fund is not on file with FMCSA",verify_result.get("bond_insurance_on_file") or "N","Y"))
+            if auth in (None,"","UNKNOWN"):
+                fs.append(finding("verify_broker_authority_not_on_file","broker_identity","warning",False,"FMCSA did not disclose broker authority status for this MC; confirm before relying on this broker",auth or "UNKNOWN","ACTIVE"))
+            elif auth!="ACTIVE":
+                fs.append(finding("verify_broker_authority_inactive","broker_identity","high",True,"Broker's FMCSA authority is on file but not active",auth,"ACTIVE"))
+            bond_required=verify_result.get("bond_insurance_required")
+            bond_on_file=verify_result.get("bond_insurance_on_file")
+            if bond_required=="REQUIRED" and bond_on_file=="ABSENT":
+                fs.append(finding("verify_broker_bond_not_on_file","broker_identity","high",True,"Broker's required BMC-84/85 bond or trust fund is not on file with FMCSA",bond_on_file,"PRESENT"))
+            elif bond_required=="REQUIRED" and bond_on_file in (None,"","UNKNOWN"):
+                fs.append(finding("verify_broker_bond_unverified","broker_identity","warning",False,"FMCSA did not disclose bond/trust-fund status for this broker; confirm before relying on this broker",bond_on_file or "UNKNOWN","PRESENT"))
             level=verify_result.get("risk_level")
             if level=="Red":
                 fs.append(finding("verify_broker_risk_red","fraud_risk","critical",True,"Metaphora Verify assessed this broker as high risk (Red)",level,"Green"))
