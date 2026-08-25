@@ -173,8 +173,8 @@ def test_responses_contain_no_external_verification_claims(api):
     for forbidden in ("fmcsa verified","insurance verified","policy active","identity verified","fraud cleared","document authentic"): assert forbidden not in text
 
 async def _verify_red_flag(settings,rate):
-    return {"status":"ok","broker_authority_status":"I","bond_insurance_required":"Y",
-            "bond_insurance_on_file":"N","risk_level":"Red",
+    return {"status":"ok","broker_authority_status":"INACTIVE","bond_insurance_required":"REQUIRED",
+            "bond_insurance_on_file":"ABSENT","risk_level":"Red",
             "flags":[{"code":"SHARED_CONTACT_REVOKED_ENTITY","message":"Shares phone with a revoked entity."}]}
 async def _verify_unavailable(settings,rate): return {"status":"unavailable"}
 
