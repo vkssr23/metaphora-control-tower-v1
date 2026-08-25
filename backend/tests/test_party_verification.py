@@ -91,8 +91,8 @@ def test_verify_mc_not_found_is_high_and_blocking():
     assert f["severity"]=="high" and f["blocking"] is True
 
 def test_verify_authority_and_bond_gaps_are_blocking():
-    vr={"status":"ok","broker_authority_status":"I","bond_insurance_required":"Y",
-        "bond_insurance_on_file":"N","risk_level":"Yellow","flags":[]}
+    vr={"status":"ok","broker_authority_status":"INACTIVE","bond_insurance_required":"REQUIRED",
+        "bond_insurance_on_file":"ABSENT","risk_level":"Yellow","flags":[]}
     findings,_=evaluate(case(),LOAD,RATE,vr)
     types={f["type"] for f in findings}
     assert {"verify_broker_authority_inactive","verify_broker_bond_not_on_file","verify_broker_risk_yellow"}<=types
@@ -100,9 +100,29 @@ def test_verify_authority_and_bond_gaps_are_blocking():
         assert next(f for f in findings if f["type"]==t)["blocking"] is True
     assert next(f for f in findings if f["type"]=="verify_broker_risk_yellow")["blocking"] is False
 
+def test_verify_undisclosed_authority_and_bond_are_non_blocking():
+    # UNKNOWN is Verify's first-class "undisclosed" state, never a negative —
+    # this must surface as a review task, not a hard block (the exact bug
+    # this test guards: the old code treated any non-"A" string, including
+    # the new "UNKNOWN", as an active-authority violation).
+    vr={"status":"ok","broker_authority_status":"UNKNOWN","bond_insurance_required":"REQUIRED",
+        "bond_insurance_on_file":"UNKNOWN","risk_level":"Green","flags":[]}
+    findings,_=evaluate(case(),LOAD,RATE,vr)
+    auth_f=next(f for f in findings if f["type"]=="verify_broker_authority_not_on_file")
+    bond_f=next(f for f in findings if f["type"]=="verify_broker_bond_unverified")
+    assert auth_f["blocking"] is False and auth_f["severity"]=="warning"
+    assert bond_f["blocking"] is False and bond_f["severity"]=="warning"
+    assert not any(f["type"] in ("verify_broker_authority_inactive","verify_broker_bond_not_on_file") for f in findings)
+
+def test_verify_active_authority_and_no_bond_required_raises_no_authority_or_bond_findings():
+    vr={"status":"ok","broker_authority_status":"ACTIVE","bond_insurance_required":"NOT_REQUIRED",
+        "bond_insurance_on_file":"ABSENT","risk_level":"Green","flags":[]}
+    findings,_=evaluate(case(),LOAD,RATE,vr)
+    assert not any(f["type"].startswith("verify_broker_authority") or f["type"].startswith("verify_broker_bond") for f in findings)
+
 def test_verify_shared_contact_flags_map_to_severity():
-    revoked_vr={"status":"ok","broker_authority_status":"A","bond_insurance_required":"N",
-                "bond_insurance_on_file":"N","risk_level":"Red",
+    revoked_vr={"status":"ok","broker_authority_status":"ACTIVE","bond_insurance_required":"NOT_REQUIRED",
+                "bond_insurance_on_file":"ABSENT","risk_level":"Red",
                 "flags":[{"code":"SHARED_CONTACT_REVOKED_ENTITY","message":"Shares phone with a revoked entity."}]}
     findings,risk=evaluate(case(),LOAD,RATE,revoked_vr)
     f=next(x for x in findings if x["type"]=="verify_broker_shared_contact_revoked_entity")
@@ -119,15 +139,15 @@ def test_verify_findings_carry_forward_resolution_like_internal_findings():
                      "resolution":"accepted_internal_value","resolution_reason":"ok for now",
                      "resolved_at":"2026-01-01","resolved_by":"u1","resolved_by_role":"admin",
                      "evidence_document_ids":[]}]
-    vr={"status":"ok","broker_authority_status":"I","bond_insurance_required":"N",
-        "bond_insurance_on_file":"N","risk_level":"Green","flags":[]}
+    vr={"status":"ok","broker_authority_status":"INACTIVE","bond_insurance_required":"NOT_REQUIRED",
+        "bond_insurance_on_file":"ABSENT","risk_level":"Green","flags":[]}
     findings,_=evaluate(c,LOAD,RATE,vr)
     carried=next(x for x in findings if x["type"]=="verify_broker_authority_inactive")
     assert carried["status"]=="waived" and carried["resolution"]=="accepted_internal_value"
 
 def test_same_verify_result_input_has_same_score_and_signals():
-    vr={"status":"ok","broker_authority_status":"I","bond_insurance_required":"N",
-        "bond_insurance_on_file":"N","risk_level":"Yellow","flags":[]}
+    vr={"status":"ok","broker_authority_status":"INACTIVE","bond_insurance_required":"NOT_REQUIRED",
+        "bond_insurance_on_file":"ABSENT","risk_level":"Yellow","flags":[]}
     first=evaluate(copy.deepcopy(case()),LOAD,RATE,copy.deepcopy(vr))[1]
     second=evaluate(copy.deepcopy(case()),LOAD,RATE,copy.deepcopy(vr))[1]
     for key in ("risk_level","risk_score","signal_count","blocking_signal_count","critical_signal_count","signals","blocking_reasons"):

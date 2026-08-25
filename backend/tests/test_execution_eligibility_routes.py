@@ -7,7 +7,7 @@ from test_party_verification_routes import passport
 
 USERS.setdefault("safety",{"id":"U-safe","email":"safe@example.test","name":"Safety","role":"safety","tenant_id":TA})
 DRIVER={"id":"D1","tenant_id":TA,"name":"Driver","status":"Available","cdl_expiry":"2030-01-01","medical_expiry":"2030-01-01","mvr_status":"Clear","clearinghouse_status":"Clear","employment_verification":"Complete"}
-TRUCK={"id":"T1","tenant_id":TA,"truck_number":"101","status":"Available","maintenance_status":"Good","insurance_expiry":"2030-01-01"}
+TRUCK={"id":"T1","tenant_id":TA,"truck_number":"101","status":"Available","maintenance_status":"Good","insurance_expiry":"2030-01-01","vin":"1FUJGHDV8CLBP8045"}
 @pytest.fixture
 def api(monkeypatch):
     db=FakeDB()
@@ -58,6 +58,32 @@ def test_missing_assignments_and_bad_maintenance_block(api):
     c,db=api; db.loads.docs[0]["driver_id"]=None; db.trucks.docs[0]["maintenance_status"]="Bad"; cid=create(c).json()["id"]
     r=c.post(f"/api/execution-eligibility-cases/{cid}/evaluate",json={},headers=h("safety")); assert r.status_code==200
     assert "driver_assignment" in r.json()["blocking_reasons"] and "truck_maintenance_condition" in r.json()["blocking_reasons"]
+def test_vehicle_verification_flows_into_truck_equipment_check(api, monkeypatch):
+    from app.infrastructure import vehicle_verification_client
+    c,db=api; cid=create(c).json()["id"]
+
+    async def fake_fetch(settings, vin):
+        assert vin=="1FUJGHDV8CLBP8045"
+        return {"status":"ok","vin_valid_checksum":False,"plausible_freight_vehicle":False,"risk_level":"Red"}
+    monkeypatch.setattr(vehicle_verification_client, "fetch_vehicle_verification", fake_fetch)
+
+    r=c.post(f"/api/execution-eligibility-cases/{cid}/evaluate",json={},headers=h("safety"))
+    assert r.status_code==200
+    body=r.json()
+    truck_check=next(x for x in body["checks"] if x["type"]=="truck_equipment_compatibility")
+    assert truck_check["result"]=="fail" and truck_check["reason"]=="vin_check_digit_invalid"
+    assert "vin_check_digit_invalid" in body["blocking_reasons"]
+    assert body["vehicle_verification_snapshot"]["risk_level"]=="Red"
+def test_vehicle_verification_unconfigured_matches_prior_behavior(api):
+    # No monkeypatch: settings.metaphora_verify_* are unset in this test
+    # harness, so fetch_vehicle_verification returns None with no network
+    # call — identical to pre-Phase-7 behavior (always insufficient_data).
+    c,db=api; cid=create(c).json()["id"]
+    r=c.post(f"/api/execution-eligibility-cases/{cid}/evaluate",json={},headers=h("safety"))
+    assert r.status_code==200
+    truck_check=next(x for x in r.json()["checks"] if x["type"]=="truck_equipment_compatibility")
+    assert truck_check["result"]=="insufficient_data"
+    assert r.json()["vehicle_verification_snapshot"]=={}
 def test_audit_start_failure_prevents_create(api):
     c,db=api; db.audit_events.fail_insert=True; assert create(c).status_code==503 and not db.execution_eligibility_cases.docs
 def test_unknown_fields_and_external_claims(api):

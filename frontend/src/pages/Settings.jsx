@@ -28,8 +28,8 @@ export default function Settings() {
 
   const themes = [
     { k: "auto", label: "Automatic / System", icon: Monitor, desc: "Follow device preference" },
-    { k: "light", label: "Light", icon: Sun, desc: "White + light gray + electric green" },
-    { k: "dark",  label: "Dark",  icon: Moon, desc: "Dark navy + graphite + electric green" },
+    { k: "light", label: "Light", icon: Sun, desc: "Warm ivory + amber" },
+    { k: "dark",  label: "Dark",  icon: Moon, desc: "Dark navy + amber" },
   ];
 
   const numFields = [

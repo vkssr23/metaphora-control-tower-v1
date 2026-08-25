@@ -57,6 +57,19 @@ def test_released_immutable_confirm_and_exception(api):
     exc=c.post(f"/api/pickup-release-cases/{cid}/exception",json={"exception_type":"other","reason":"custody review"},headers=h("ops")); assert exc.status_code==200 and exc.json()["status"]=="exception"
 def test_audit_start_failure_prevents_create(api):
     c,db=api; db.audit_events.fail_insert=True; assert create(c).status_code==503 and not db.pickup_release_cases.docs
+def test_vin_verification_failure_blocks_pickup_release_via_existing_wiring(api):
+    # Regression proof for Phase 7's Secure Pickup slice: pickup_release.py
+    # itself is unmodified — a VIN check failing on execution-eligibility
+    # (which reverts its status away from "eligible") must still correctly
+    # block pickup-release through the pre-existing execution_eligibility_
+    # not_current wiring, with zero new code in this file.
+    c,db=api
+    db.execution_eligibility_cases.docs[0]["status"]="review_pending"
+    cid=create(c).json()["id"]
+    out=c.post(f"/api/pickup-release-cases/{cid}/evaluate",json={},headers=h("ops"))
+    assert out.status_code==200
+    assert "execution_eligibility_not_current" in out.json()["blocking_reasons"]
+    assert out.json()["verdict"]!="release_ready"
 @pytest.mark.parametrize("collection",["rate_confirmation_extractions","party_verification_cases","execution_eligibility_cases","load_passports"])
 def test_prerequisite_version_drift_blocks_and_refresh_requires_evaluation(api,collection):
     c,db=api; cid=create(c).json()["id"]; getattr(db,collection).docs[0]["version"]+=1

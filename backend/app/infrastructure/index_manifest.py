@@ -23,6 +23,9 @@ def _i(collection, name, fields, *, unique=False, purpose, priority="P0", partia
 # Partial filters deliberately mirror Phase 1 status vocabularies.
 _MANIFEST = (
     _i("tenants", "uq_tenants_id", (("id", 1),), unique=True, purpose="Canonical tenant identity"),
+    _i("tenants", "uq_tenants_metaphora_org_id", (("metaphora_org_id", 1),), unique=True,
+       partial={"metaphora_org_id": {"$exists": True}},
+       purpose="One Control Tower tenant per Metaphora Secure org (SSO bootstrap idempotency)"),
     _i("users", "uq_users_email", (("email", 1),), unique=True, purpose="Normalized login email"),
     _i("users", "uq_users_tenant_id_id", (("tenant_id", 1), ("id", 1)), unique=True, purpose="Tenant user identity"),
     *(_i(c, f"uq_{c}_tenant_id_id", (("tenant_id", 1), ("id", 1)), unique=True, purpose="Tenant-scoped entity identity") for c in (

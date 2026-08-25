@@ -10,8 +10,17 @@ SAFE = {
     "ALLOW_SEED_ENDPOINT": "false", "DOCUMENT_STORAGE_BACKEND": "local",
     "OFFLINE_REGRESSION_VERIFIED": "true", "GOLDEN_FLOW_VERIFIED": "true",
     "SECURITY_SUITE_VERIFIED": "true", "REAL_MONGO_VERIFIED": "true",
-    "INDEXES_VERIFIED": "true", "TRANSACTIONS_VERIFIED": "true",
-    "BACKUP_RESTORE_VERIFIED": "true",
+    "INDEXES_VERIFIED": "true", "GITHUB_CI_VERIFIED":"true",
+    "MONGO_TOPOLOGY_VERIFIED":"true", "TRANSACTION_CAPABILITY_VERIFIED":"true",
+    "PILOT_UOW_MODE_VERIFIED":"true", "REAL_MONGO_CONCURRENCY_VERIFIED":"true",
+    "STAGING_ISOLATION_VERIFIED":"true", "DOCUMENT_DURABILITY_VERIFIED":"true",
+    "STAGING_BACKEND_HEALTH_VERIFIED":"true", "STAGING_FRONTEND_HEALTH_VERIFIED":"true",
+    "STAGING_AUTH_VERIFIED":"true", "STAGING_CORS_BEHAVIOR_VERIFIED":"true",
+    "STAGING_GOLDEN_FLOW_VERIFIED":"true", "CROSS_TENANT_DOCUMENT_DENIAL_VERIFIED":"true",
+    "NO_EXTERNAL_SUBMISSION_VERIFIED":"true", "BACKUP_RESTORE_VERIFIED":"true",
+    "RESTORED_DOCUMENTS_VERIFIED":"true", "RESTORED_AUDIT_VERIFIED":"true",
+    "PRODUCTION_INTEGRITY_VERIFIED":"true", "PERFORMANCE_SMOKE_VERIFIED":"true",
+    "REQUEST_ID_VERIFIED":"true",
 }
 
 
@@ -22,6 +31,7 @@ def test_all_mandatory_evidence_is_ready_with_controlled_local_limitation():
     assert result["limitations"] == ["LOCAL_PILOT_ONLY"]
     assert result["certification_levels"]["code_pilot_candidate"] == "pass"
     assert result["certification_levels"]["controlled_staging_ready"] == "pass"
+    assert result["certification_levels"]["customer_pilot_ready"] == "not_evaluated"
     assert not result["secrets_included"]
 
 
