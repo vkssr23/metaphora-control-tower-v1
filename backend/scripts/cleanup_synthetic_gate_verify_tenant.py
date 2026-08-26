@@ -1,17 +1,19 @@
-"""One-purpose cleanup for the exact synthetic gate-verification tenant/user
-created during production behavior verification on 2026-08-26 (Sprint 2E
-merge check). Fixed IDs only — no arbitrary tenant argument, and this
-script deletes nothing else, ever.
+"""One-purpose cleanup for the exact synthetic gate-verification tenant,
+user, and its auto-created default assumptions document, created during
+production behavior verification on 2026-08-26 (Sprint 2E merge check).
+Fixed IDs only — no arbitrary tenant argument, and this script deletes
+nothing else, ever.
 
 Dry-run by default. --execute additionally requires --confirm with the
 exact CONFIRMATION phrase. Precheck must pass in full before any delete is
 attempted, in either mode; a mismatch on any single check aborts the whole
 run with no partial action.
 
-Never prints email, password hash, token, credential, document payload, or
-environment values — only booleans, counts, and ids already known to the
-caller (TENANT_ID/USER_ID are constants in this file, not derived from
-output).
+Never prints email, password hash, token, credential, document payload
+(including the assumptions document's field values), or environment
+values — only booleans, counts, and ids already known to the caller
+(TENANT_ID/USER_ID/ASSUMPTIONS_DOC_ID are constants in this file, not
+derived from output).
 """
 from __future__ import annotations
 
@@ -26,13 +28,22 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import ConfigurationError, InvalidOperation, PyMongoError
 
+from app.constants import DEFAULT_ASSUMPTIONS
 from app.production_integrity import TENANT_SCOPED
 
 TENANT_ID = "ten_fdcbe506cd24489eb1159aa242a11159"
 USER_ID = "UDB5D9D4F"
+# tenant_document(user, DEFAULT_ASSUMPTIONS) in auth_routes.py's signup()
+# writes DEFAULT_ASSUMPTIONS verbatim plus tenant_id — "id" is always the
+# literal string "default" (one per tenant, enforced by the
+# uq_assumptions_tenant_id_id unique index), not a generated per-document
+# id. No application-level created_at exists on this document, so the
+# creation-time check below uses Mongo's own _id ObjectId timestamp instead.
+ASSUMPTIONS_DOC_ID = DEFAULT_ASSUMPTIONS["id"]
 EMAIL_DOMAIN_MARKER = "sprint2e-gate-check.dev"
 # Tight window around the actual verification signup (2026-08-26T00:45:38Z),
 # defense-in-depth beyond the id match.
@@ -52,17 +63,32 @@ def _in_window(value) -> bool:
     return CREATED_WINDOW_START <= ts <= CREATED_WINDOW_END
 
 
+def _object_id_in_window(oid) -> bool:
+    if not isinstance(oid, ObjectId):
+        return False
+    return CREATED_WINDOW_START <= oid.generation_time <= CREATED_WINDOW_END
+
+
+def _assumptions_matches_default_schema(doc: dict) -> bool:
+    """Every DEFAULT_ASSUMPTIONS field must be present and unmodified — a
+    customized/edited assumptions doc must never be treated as the
+    untouched signup default. Never returns or logs the field values."""
+    return all(doc.get(k) == v for k, v in DEFAULT_ASSUMPTIONS.items())
+
+
 async def precheck(db) -> dict:
-    """Read-only. Never returns the email itself — only a marker boolean."""
+    """Read-only. Never returns the email or assumptions field values —
+    only marker booleans."""
     tenant = await db.tenants.find_one({"id": TENANT_ID}, {"_id": 0, "id": 1, "created_at": 1}, max_time_ms=MAX_TIME_MS)
     users = await db.users.find({"tenant_id": TENANT_ID}, {"_id": 0, "id": 1, "created_at": 1, "email": 1}, max_time_ms=MAX_TIME_MS).to_list(length=10)
+    assumptions = await db.assumptions.find({"tenant_id": TENANT_ID}, max_time_ms=MAX_TIME_MS).to_list(length=10)
 
     counts = {}
     for collection in sorted(TENANT_SCOPED):
-        # users is checked separately above (exact identity, not just a
-        # count); audit_events is inventoried and preserved below, not a
-        # "business record" that must be zero.
-        if collection in ("users", "audit_events"):
+        # users and assumptions are checked separately (exact identity/
+        # schema, not just a count); audit_events is inventoried and
+        # preserved below, not a "business record" that must be zero.
+        if collection in ("users", "assumptions", "audit_events"):
             continue
         counts[collection] = await db[collection].count_documents({"tenant_id": TENANT_ID}, maxTimeMS=MAX_TIME_MS)
 
@@ -72,6 +98,8 @@ async def precheck(db) -> dict:
     email = matching_user.get("email") if matching_user else None
     email_marker_ok = isinstance(email, str) and EMAIL_DOMAIN_MARKER in email
 
+    matching_assumptions = assumptions[0] if len(assumptions) == 1 else None
+
     checks = {
         "tenant_found": tenant is not None,
         "tenant_id_matches": bool(tenant and tenant.get("id") == TENANT_ID),
@@ -80,6 +108,10 @@ async def precheck(db) -> dict:
         "user_id_matches": matching_user is not None,
         "user_created_in_window": _in_window((matching_user or {}).get("created_at")),
         "synthetic_email_marker_present": email_marker_ok,
+        "exactly_one_assumptions_for_tenant": len(assumptions) == 1,
+        "assumptions_id_matches": bool(matching_assumptions and matching_assumptions.get("id") == ASSUMPTIONS_DOC_ID),
+        "assumptions_matches_default_schema": bool(matching_assumptions and _assumptions_matches_default_schema(matching_assumptions)),
+        "assumptions_created_in_window": _object_id_in_window((matching_assumptions or {}).get("_id")),
         "zero_business_records": all(v == 0 for v in counts.values()),
     }
     return {
@@ -91,10 +123,11 @@ async def precheck(db) -> dict:
     }
 
 
-async def _both_already_absent(db) -> bool:
+async def _all_already_absent(db) -> bool:
     tenant = await db.tenants.find_one({"id": TENANT_ID}, {"_id": 1}, max_time_ms=MAX_TIME_MS)
     user = await db.users.find_one({"id": USER_ID}, {"_id": 1}, max_time_ms=MAX_TIME_MS)
-    return tenant is None and user is None
+    assumptions = await db.assumptions.find_one({"id": ASSUMPTIONS_DOC_ID, "tenant_id": TENANT_ID}, {"_id": 1}, max_time_ms=MAX_TIME_MS)
+    return tenant is None and user is None and assumptions is None
 
 
 async def _transactions_supported(client) -> bool:
@@ -108,7 +141,7 @@ async def _transactions_supported(client) -> bool:
 
 
 async def execute(db, client) -> dict:
-    if await _both_already_absent(db):
+    if await _all_already_absent(db):
         return {"status": "ALREADY_CLEANED_UP"}
 
     pre = await precheck(db)
@@ -119,14 +152,15 @@ async def execute(db, client) -> dict:
         return {"status": "ABORT_NO_TRANSACTION_SUPPORT"}
 
     session = await client.start_session()
-    deleted = {"user": 0, "tenant": 0}
+    deleted = {"assumptions": 0, "user": 0, "tenant": 0}
     try:
         async with session.start_transaction():
+            da = await db.assumptions.delete_one({"id": ASSUMPTIONS_DOC_ID, "tenant_id": TENANT_ID}, session=session)
             du = await db.users.delete_one({"id": USER_ID, "tenant_id": TENANT_ID}, session=session)
             dt = await db.tenants.delete_one({"id": TENANT_ID}, session=session)
-            if du.deleted_count != 1 or dt.deleted_count != 1:
+            if da.deleted_count != 1 or du.deleted_count != 1 or dt.deleted_count != 1:
                 raise RuntimeError("delete_count_mismatch")
-            deleted["user"], deleted["tenant"] = du.deleted_count, dt.deleted_count
+            deleted["assumptions"], deleted["user"], deleted["tenant"] = da.deleted_count, du.deleted_count, dt.deleted_count
     except (PyMongoError, ConfigurationError, InvalidOperation, RuntimeError) as exc:
         return {"status": "ABORT_TRANSACTION_FAILED", "reason_code": exc.__class__.__name__}
     finally:
@@ -134,14 +168,20 @@ async def execute(db, client) -> dict:
 
     tenant_absent = (await db.tenants.find_one({"id": TENANT_ID}, {"_id": 1}, max_time_ms=MAX_TIME_MS)) is None
     user_absent = (await db.users.find_one({"id": USER_ID}, {"_id": 1}, max_time_ms=MAX_TIME_MS)) is None
+    assumptions_absent = (await db.assumptions.find_one({"id": ASSUMPTIONS_DOC_ID, "tenant_id": TENANT_ID}, {"_id": 1}, max_time_ms=MAX_TIME_MS)) is None
     audit_preserved = await db.audit_events.count_documents({"tenant_id": TENANT_ID}, maxTimeMS=MAX_TIME_MS)
-    verified = deleted["user"] == 1 and deleted["tenant"] == 1 and tenant_absent and user_absent
+    verified = (
+        deleted["assumptions"] == 1 and deleted["user"] == 1 and deleted["tenant"] == 1
+        and tenant_absent and user_absent and assumptions_absent
+    )
     return {
         "status": "DELETED" if verified else "ABORT_VERIFY_FAILED",
+        "deleted_assumptions_count": deleted["assumptions"],
         "deleted_user_count": deleted["user"],
         "deleted_tenant_count": deleted["tenant"],
         "tenant_absent": tenant_absent,
         "user_absent": user_absent,
+        "assumptions_absent": assumptions_absent,
         "audit_events_preserved_count": audit_preserved,
     }
 
