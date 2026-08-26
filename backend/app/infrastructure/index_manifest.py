@@ -23,8 +23,17 @@ def _i(collection, name, fields, *, unique=False, purpose, priority="P0", partia
 # Partial filters deliberately mirror Phase 1 status vocabularies.
 _MANIFEST = (
     _i("tenants", "uq_tenants_id", (("id", 1),), unique=True, purpose="Canonical tenant identity"),
+    # $exists:true alone also matches an explicit BSON null (present-but-
+    # unset), which every ordinary (non-SSO) tenant used to write — see
+    # auth_routes.py's signup handler. $type:"string" plus $gt:"" excludes
+    # missing, null, and empty-string values; both operators are on the
+    # partial-filter allowlist (equality, $exists, $gt/$gte/$lt/$lte, $type).
+    # A whitespace-only string ("   ") cannot be excluded by a partial filter
+    # expression at all ($regex isn't permitted there) — that case is
+    # prevented at the write boundary instead (verify_org_id.strip() checked
+    # non-empty before insert).
     _i("tenants", "uq_tenants_metaphora_org_id", (("metaphora_org_id", 1),), unique=True,
-       partial={"metaphora_org_id": {"$exists": True}},
+       partial={"metaphora_org_id": {"$type": "string", "$gt": ""}},
        purpose="One Control Tower tenant per Metaphora Secure org (SSO bootstrap idempotency)"),
     _i("users", "uq_users_email", (("email", 1),), unique=True, purpose="Normalized login email"),
     _i("users", "uq_users_tenant_id_id", (("tenant_id", 1), ("id", 1)), unique=True, purpose="Tenant user identity"),

@@ -154,7 +154,10 @@ def test_tenant_org_id_index_definition_matches_sso_idempotency_requirement():
     assert idx.collection == "tenants"
     assert idx.unique is True
     assert idx.fields == (("metaphora_org_id", 1),)
-    assert idx.partial_filter == {"metaphora_org_id": {"$exists": True}}
+    # $exists:True alone also matches an explicit null (what every ordinary,
+    # non-SSO tenant used to write) — corrected to $type:"string" + $gt:"" so
+    # only real linked-org strings participate in the unique constraint.
+    assert idx.partial_filter == {"metaphora_org_id": {"$type": "string", "$gt": ""}}
 
 
 def test_module_source_contains_no_write_capable_calls():

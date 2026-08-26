@@ -89,7 +89,12 @@ def register_auth_routes(public_api, api, get_current_user):
         if existing:
             raise HTTPException(400, "Email exists")
         timestamp = now_iso()
-        tenant = TenantRecord(id=new_tenant_id(), name=f"{data.name.strip() or 'New'} Workspace", status=TenantStatus.ACTIVE, created_at=timestamp, updated_at=timestamp).model_dump(mode="json")
+        # exclude_none: an unlinked tenant must have metaphora_org_id genuinely
+        # MISSING, not present-as-null — $exists:true (the partial-index guard
+        # for uq_tenants_metaphora_org_id) matches null just as much as a real
+        # value, so writing null here would make every ordinary signup tenant
+        # collide under that unique index.
+        tenant = TenantRecord(id=new_tenant_id(), name=f"{data.name.strip() or 'New'} Workspace", status=TenantStatus.ACTIVE, created_at=timestamp, updated_at=timestamp).model_dump(mode="json", exclude_none=True)
         await safe_db(db.tenants.insert_one(tenant), "tenant create")
         user = {
             "id": new_id("U"), "email": str(data.email), "name": data.name, "role": "viewer",
@@ -146,7 +151,10 @@ def register_auth_routes(public_api, api, get_current_user):
         if result is None or result.get("status") != "ok":
             raise HTTPException(400, "Sign-in link is invalid or has expired")
 
-        verify_org_id = str(result["org_id"])
+        verify_org_id = str(result["org_id"]).strip()
+        if not verify_org_id:
+            logging.error("Metaphora SSO exchange returned a blank org_id")
+            raise HTTPException(502, "Metaphora Secure returned an invalid organization identity")
         timestamp = now_iso()
         email = result["email"].strip().lower()
 

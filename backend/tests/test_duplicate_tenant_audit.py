@@ -133,9 +133,40 @@ def test_both_tenant_ids_and_required_metadata_reported():
     for t in report["tenants"]:
         assert set(t.keys()) == {
             "tenant_id", "created_at", "status", "is_known_smoke_tenant",
-            "has_metaphora_org_id", "user_count", "related_record_counts",
+            "metaphora_org_id_shape", "user_count", "related_record_counts",
         }
-        assert t["has_metaphora_org_id"] is True
+        shape = t["metaphora_org_id_shape"]
+        assert set(shape.keys()) == {"exists", "bson_type", "is_null", "is_empty_or_whitespace", "string_length"}
+        assert shape["exists"] is True and shape["bson_type"] == "string" and shape["is_null"] is False
+
+
+def test_org_id_shape_missing_field():
+    shape = audit._org_id_shape({"id": TENANT_A})
+    assert shape == {"exists": False, "bson_type": "missing", "is_null": False, "is_empty_or_whitespace": False, "string_length": None}
+
+
+def test_org_id_shape_explicit_null():
+    shape = audit._org_id_shape({"id": TENANT_A, "metaphora_org_id": None})
+    assert shape == {"exists": True, "bson_type": "null", "is_null": True, "is_empty_or_whitespace": False, "string_length": None}
+
+
+def test_org_id_shape_empty_string():
+    shape = audit._org_id_shape({"id": TENANT_A, "metaphora_org_id": ""})
+    assert shape["exists"] is True and shape["bson_type"] == "string" and shape["is_null"] is False
+    assert shape["is_empty_or_whitespace"] is True and shape["string_length"] == 0
+
+
+def test_org_id_shape_whitespace_only_string():
+    shape = audit._org_id_shape({"id": TENANT_A, "metaphora_org_id": "   "})
+    assert shape["bson_type"] == "string" and shape["is_empty_or_whitespace"] is True and shape["string_length"] == 3
+
+
+def test_org_id_shape_valid_id_never_exposes_the_value():
+    shape = audit._org_id_shape({"id": TENANT_A, "metaphora_org_id": "42"})
+    assert shape["exists"] is True and shape["bson_type"] == "string"
+    assert shape["is_null"] is False and shape["is_empty_or_whitespace"] is False
+    assert shape["string_length"] == 2
+    assert "42" not in json.dumps(shape)
 
 
 def test_smoke_tenant_name_heuristic_is_boolean_only():
