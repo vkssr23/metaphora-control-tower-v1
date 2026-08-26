@@ -6,8 +6,10 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+from bson import ObjectId
 from pymongo.errors import ExecutionTimeout
 
+from app.constants import DEFAULT_ASSUMPTIONS
 from app.production_integrity import TENANT_SCOPED
 from scripts import cleanup_synthetic_gate_verify_tenant as cleanup
 
@@ -15,6 +17,8 @@ TENANT_ID = cleanup.TENANT_ID
 USER_ID = cleanup.USER_ID
 GOOD_CREATED_AT = "2026-08-26T00:45:30+00:00"
 GOOD_EMAIL = f"gate-verify-123@{cleanup.EMAIL_DOMAIN_MARKER}"
+GOOD_OID = ObjectId.from_datetime(cleanup.CREATED_WINDOW_START.replace(minute=45, second=30))
+BAD_WINDOW_OID = ObjectId.from_datetime(cleanup.CREATED_WINDOW_START.replace(day=25))
 
 
 class FakeCollection:
@@ -114,9 +118,20 @@ class FakeClient:
         self.closed = True
 
 
-def _seed_valid_state(db, *, tenant_created=GOOD_CREATED_AT, user_created=GOOD_CREATED_AT, email=GOOD_EMAIL, extra_business_record=False):
+def _valid_assumptions_doc(oid=GOOD_OID, overrides=None):
+    doc = {**DEFAULT_ASSUMPTIONS, "tenant_id": TENANT_ID, "_id": oid}
+    if overrides:
+        doc.update(overrides)
+    return doc
+
+
+def _seed_valid_state(db, *, tenant_created=GOOD_CREATED_AT, user_created=GOOD_CREATED_AT, email=GOOD_EMAIL,
+                       extra_business_record=False, assumptions_docs=None):
     db.tenants.docs.append({"id": TENANT_ID, "created_at": tenant_created})
     db.users.docs.append({"id": USER_ID, "tenant_id": TENANT_ID, "created_at": user_created, "email": email})
+    if assumptions_docs is None:
+        assumptions_docs = [_valid_assumptions_doc()]
+    db.assumptions.docs.extend(assumptions_docs)
     if extra_business_record:
         db.loads.docs.append({"id": "L1", "tenant_id": TENANT_ID})
 
@@ -199,24 +214,88 @@ def test_no_transaction_support_fails_closed_no_partial_delete():
     assert len(db.tenants.docs) == 1 and len(db.users.docs) == 1
 
 
-def test_transaction_failure_mid_delete_rolls_back_no_partial_cleanup():
-    db = FakeDB(fail_delete_on="tenants")  # user delete succeeds first, tenant delete raises
+def test_rollback_on_assumptions_delete_failure_no_partial_cleanup():
+    db = FakeDB(fail_delete_on="assumptions")  # fails at the first delete in the transaction
     _seed_valid_state(db)
     code = cleanup.main(argv=["--execute", "--confirm", cleanup.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
     assert code == 2
-    # Neither commit happened — the user "delete" was only staged in the
-    # session, never applied, because the transaction never committed.
-    assert len(db.tenants.docs) == 1 and len(db.users.docs) == 1
+    assert len(db.assumptions.docs) == 1 and len(db.users.docs) == 1 and len(db.tenants.docs) == 1
 
 
-def test_successful_execute_deletes_both_and_preserves_audit_events():
+def test_rollback_on_user_delete_failure_no_partial_cleanup():
+    db = FakeDB(fail_delete_on="users")  # assumptions delete stages successfully, then this fails
+    _seed_valid_state(db)
+    code = cleanup.main(argv=["--execute", "--confirm", cleanup.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    assert code == 2
+    assert len(db.assumptions.docs) == 1 and len(db.users.docs) == 1 and len(db.tenants.docs) == 1
+
+
+def test_rollback_on_tenant_delete_failure_no_partial_cleanup():
+    db = FakeDB(fail_delete_on="tenants")  # last delete in the transaction fails
+    _seed_valid_state(db)
+    code = cleanup.main(argv=["--execute", "--confirm", cleanup.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    assert code == 2
+    # Nothing committed — the assumptions and user "deletes" were only
+    # staged in the session, never applied, because the transaction as a
+    # whole never committed.
+    assert len(db.assumptions.docs) == 1 and len(db.users.docs) == 1 and len(db.tenants.docs) == 1
+
+
+def test_successful_execute_deletes_all_three_and_preserves_audit_events():
     db = FakeDB()
     _seed_valid_state(db)
     db.audit_events.docs.append({"id": "AE1", "tenant_id": TENANT_ID})
     code = cleanup.main(argv=["--execute", "--confirm", cleanup.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
     assert code == 0
-    assert db.tenants.docs == [] and db.users.docs == []
+    assert db.tenants.docs == [] and db.users.docs == [] and db.assumptions.docs == []
     assert len(db.audit_events.docs) == 1  # preserved, not deleted
+
+
+def test_missing_assumptions_document_aborts():
+    db = FakeDB()
+    _seed_valid_state(db, assumptions_docs=[])
+    code = cleanup.main(argv=["--execute", "--confirm", cleanup.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    assert code == 2
+    assert len(db.tenants.docs) == 1  # nothing deleted
+
+
+def test_multiple_assumptions_documents_aborts():
+    db = FakeDB()
+    _seed_valid_state(db, assumptions_docs=[_valid_assumptions_doc(oid=GOOD_OID), _valid_assumptions_doc(oid=ObjectId.from_datetime(cleanup.CREATED_WINDOW_START))])
+    code = cleanup.main(argv=["--execute", "--confirm", cleanup.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    assert code == 2
+    assert len(db.tenants.docs) == 1
+    assert len(db.assumptions.docs) == 2  # nothing deleted
+
+
+def test_modified_assumptions_field_aborts():
+    """A customized/edited assumptions doc (one field changed from the
+    signup default) must never be treated as the untouched synthetic one."""
+    db = FakeDB()
+    _seed_valid_state(db, assumptions_docs=[_valid_assumptions_doc(overrides={"fuel_price": 9.99})])
+    code = cleanup.main(argv=["--execute", "--confirm", cleanup.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    assert code == 2
+    assert len(db.tenants.docs) == 1 and len(db.assumptions.docs) == 1
+
+
+def test_assumptions_outside_creation_window_aborts():
+    db = FakeDB()
+    _seed_valid_state(db, assumptions_docs=[_valid_assumptions_doc(oid=BAD_WINDOW_OID)])
+    code = cleanup.main(argv=["--execute", "--confirm", cleanup.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    assert code == 2
+    assert len(db.tenants.docs) == 1
+
+
+def test_dry_run_reports_expected_assumptions_checks_pass(capsys):
+    db = FakeDB()
+    _seed_valid_state(db)
+    code = cleanup.main(environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["ok"] is True
+    assert out["checks"]["exactly_one_assumptions_for_tenant"] is True
+    assert out["checks"]["assumptions_id_matches"] is True
+    assert out["checks"]["assumptions_matches_default_schema"] is True
+    assert out["checks"]["assumptions_created_in_window"] is True
 
 
 def test_rerun_after_success_is_idempotent_already_cleaned_up():
@@ -233,6 +312,20 @@ def test_output_never_contains_email_or_secrets(capsys):
     out = capsys.readouterr().out
     assert GOOD_EMAIL not in out
     assert "pw@host" not in out and "proddb" not in out
+
+
+def test_output_never_contains_assumptions_field_values(capsys):
+    db = FakeDB()
+    _seed_valid_state(db)
+    cleanup.main(environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    out = capsys.readouterr().out
+    # "default" (the id field) legitimately appears as a substring of our
+    # own check name ("assumptions_matches_default_schema"); everything
+    # else in DEFAULT_ASSUMPTIONS is a config number that must never surface.
+    for key, value in DEFAULT_ASSUMPTIONS.items():
+        if key == "id":
+            continue
+        assert str(value) not in out
 
 
 def test_missing_env_fails_closed_without_connecting():
