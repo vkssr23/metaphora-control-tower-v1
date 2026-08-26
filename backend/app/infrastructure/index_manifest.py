@@ -41,7 +41,7 @@ _MANIFEST = (
         "loads","drivers","trucks","documents","audit_events","load_passports","rate_confirmation_extractions",
         "party_verification_cases","execution_eligibility_cases","pickup_release_cases","execution_sessions",
         "execution_events","execution_exceptions","invoice_readiness_cases","invoice_packages","invoices","assumptions",
-        "operations","outbox_events","reconciliation_items","action_items")),
+        "operations","outbox_events","reconciliation_items","action_items","dispatch_authorization_evaluations")),
     _i("trucks", "uq_trucks_tenant_truck_number", (("tenant_id",1),("truck_number",1)), unique=True, purpose="Truck number uniqueness"),
     _i("load_passports", "uq_load_passports_tenant_load", (("tenant_id",1),("load_id",1)), unique=True, purpose="One passport per load"),
     _i("rate_confirmation_extractions", "uq_rc_tenant_document_revision", (("tenant_id",1),("document_id",1),("revision",1)), unique=True, purpose="One extraction revision per document"),
@@ -67,6 +67,8 @@ _MANIFEST = (
     _i("action_items", "ix_action_items_queue", (("tenant_id",1),("status",1),("severity",1),("first_detected_at",1)), purpose="Bounded operator work queue", priority="P1"),
     _i("action_items", "ix_action_items_load", (("tenant_id",1),("load_id",1),("status",1)), purpose="Load-scoped action lookup", priority="P1"),
     _i("loads", "ix_loads_tenant_stage_updated", (("tenant_id",1),("stage",1),("updated_at",-1)), purpose="Operations load queue", priority="P2"),
+    _i("dispatch_authorization_evaluations", "uq_dispatch_authorization_evaluations_input", (("tenant_id",1),("load_id",1),("subject",1),("input_hash",1)), unique=True, purpose="Idempotent replay of an identical shadow evaluation (standalone Mongo, no transactions)", priority="P1"),
+    _i("dispatch_authorization_evaluations", "ix_dispatch_authorization_evaluations_tenant_load_time", (("tenant_id",1),("load_id",1),("evaluated_at",1),("id",1)), purpose="Shadow-evaluation chronology per load", priority="P1"),
 )
 
 

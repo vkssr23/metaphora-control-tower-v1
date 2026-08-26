@@ -10,6 +10,8 @@ from app.schemas.passports import (CheckpointStatus, CheckpointType, CheckpointU
     PassportCreate, PassportUpdate, ReasonAction)
 from app.tenant import tenant_document, tenant_filter
 from app.execution_invalidation import preinvalidate_for_load
+from app.runtime import settings
+from app.dispatch_authorization_shadow import shadow_evaluate_passport_authorization
 
 ADMIN_ROLES={"owner","admin"}; OPERATIONAL_ROLES={"owner","admin","operations","dispatcher"}
 ALLOWED={"draft":{"review_pending"},"review_pending":{"approved","blocked"},"blocked":{"review_pending"},"approved":{"pickup_authorized","revoked"},"pickup_authorized":{"revoked"},"revoked":{"review_pending"}}
@@ -129,6 +131,7 @@ def register_passport_routes(api,db,get_current_user):
     @api.post("/load-passports/{passport_id}/authorize-pickup")
     async def authorize_pickup(passport_id:str,data:EmptyAction,user=Depends(get_current_user)):
         _role(user,ADMIN_ROLES); p=await _passport(db,user,passport_id); load=await _load(db,user,p["load_id"]); ready=evaluate_readiness(p,load)
+        await shadow_evaluate_passport_authorization(db,settings,user,p,load,ready)
         if not ready["ready_for_pickup_authorization"]: raise HTTPException(409,detail=ready)
         authorization={"id":_id("pua_"),"passport_id":p["id"],"passport_version":p["version"]+1,"status":"active","issued_at":utc_now(),"issued_by":user["id"],"revoked_at":None,"revoked_by":None,"revocation_reason":"","load_id":p["load_id"],"driver_id":p["assignment_snapshot"].get("driver_id"),"truck_id":p["assignment_snapshot"].get("truck_id"),"trailer_identifier":p["assignment_snapshot"].get("trailer_identifier",""),"pickup_location":p["load_snapshot"].get("pickup_address",""),"pickup_window":p["load_snapshot"].get("pickup_appt","")}
         authorization["authorization_snapshot_hash"]=canonical_hash({k:v for k,v in authorization.items() if k not in {"id","issued_at","issued_by","revoked_at","revoked_by","revocation_reason","authorization_snapshot_hash"}}|{"checkpoints":p["checkpoints"]})

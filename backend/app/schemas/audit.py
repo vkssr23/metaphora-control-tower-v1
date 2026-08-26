@@ -48,6 +48,7 @@ class AuditEntityType(str, Enum):
     ACCESSORIAL = "accessorial"
     INVOICE_PACKAGE = "invoice_package"
     ACTION_ITEM = "action_item"
+    DISPATCH_AUTHORIZATION_EVALUATION = "dispatch_authorization_evaluation"
 
 
 class AuditEvent(BaseModel):

@@ -73,6 +73,11 @@ class Settings:
     cors_origins: list[str]
     app_env: str
     allow_seed_endpoint: bool
+    # Dispatch-authorization shadow evaluator gate. Defaults OFF: PR1 only
+    # lays the evaluation foundation (pure evaluator + append-only shadow
+    # records), it never blocks anything. A later change makes the
+    # evaluator's decision load-bearing when this is on.
+    dispatch_gate_enforced: bool = False
     document_storage_backend: str = "local"
     document_storage_root: str = "./data/documents"
     document_max_upload_bytes: int = 15 * 1024 * 1024
@@ -104,6 +109,7 @@ class Settings:
             cors_origins=parse_cors_origins(os.environ.get("CORS_ORIGINS")),
             app_env=os.environ.get("APP_ENV", "production").strip().lower(),
             allow_seed_endpoint=env_flag("ALLOW_SEED_ENDPOINT"),
+            dispatch_gate_enforced=env_flag("DISPATCH_GATE_ENFORCED"),
             document_storage_backend=backend,
             document_storage_root=os.environ.get("DOCUMENT_STORAGE_ROOT", "./data/documents"),
             document_max_upload_bytes=maximum,
