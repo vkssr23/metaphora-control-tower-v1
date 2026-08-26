@@ -27,6 +27,20 @@ def test_signup_tenant_has_no_metaphora_org_id_key_at_all(api):
     assert "metaphora_org_id" not in db.tenants.docs[0]
 
 
+def test_signup_cannot_inject_metaphora_org_id(api):
+    """SignupIn has extra='forbid' and no metaphora_org_id field — a client
+    attempting to claim SSO linkage through public signup must be rejected,
+    not silently ignored, and nothing may be persisted."""
+    c, db = api
+    r = c.post("/api/auth/signup", json={
+        "email": "attacker@example.com", "password": "at-least-12-chars", "name": "Attacker",
+        "metaphora_org_id": "42",
+    })
+    assert r.status_code == 422, r.text
+    assert not db.tenants.docs
+    assert not any(u.get("email") == "attacker@example.com" for u in db.users.docs)
+
+
 def _returns(value):
     async def fake(settings, code):
         return value
