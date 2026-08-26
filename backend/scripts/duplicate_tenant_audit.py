@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Callable
 
@@ -67,10 +68,18 @@ async def _find_conflicting_group(db, max_time_ms: int) -> dict | None:
 
 async def _tenant_report(db, tenant_id: str, max_time_ms: int) -> dict:
     try:
+        # find()/find_one() build a pymongo Cursor, whose __init__ takes an
+        # explicit, non-**kwargs parameter list — the Python-side name is
+        # max_time_ms (snake_case). Unlike aggregate()/count_documents()/
+        # command()/estimated_document_count(), which end in a permissive
+        # **kwargs merged straight into the wire command (so the BSON-style
+        # camelCase maxTimeMS works there), Cursor.__init__ has no such
+        # catch-all — passing maxTimeMS here raises
+        # "TypeError: unexpected keyword argument 'maxTimeMS'".
         doc = await db.tenants.find_one(
             {"id": tenant_id},
             {"_id": 0, "id": 1, "status": 1, "created_at": 1, "name": 1, "metaphora_org_id": 1},
-            maxTimeMS=max_time_ms,
+            max_time_ms=max_time_ms,
         )
     except PyMongoError as exc:
         raise AuditTimeout("tenant_lookup", tenant_id) from exc
@@ -135,6 +144,17 @@ async def run_audit(mongo_url: str, db_name: str, client_factory: Callable = Asy
         client.close()
 
 
+def _safe_diagnostic(exc: BaseException) -> dict:
+    """Script filename, function, and source line number only — never the
+    exception message, locals, values, documents, URI, or a full traceback."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    own_frames = [f for f in frames if Path(f.filename).name == Path(__file__).name]
+    frame = own_frames[-1] if own_frames else (frames[-1] if frames else None)
+    if frame is None:
+        return {"file": None, "function": None, "line": None}
+    return {"file": Path(frame.filename).name, "function": frame.name, "line": frame.lineno}
+
+
 def main(argv: list[str] | None = None, environ: dict | None = None, client_factory: Callable = AsyncIOMotorClient) -> int:
     env = os.environ if environ is None else environ
     mongo_url, db_name = env.get("MONGO_URL"), env.get("DB_NAME")
@@ -145,7 +165,7 @@ def main(argv: list[str] | None = None, environ: dict | None = None, client_fact
     try:
         report = asyncio.run(run_audit(mongo_url, db_name, client_factory, max_time_ms=max_time_ms))
     except Exception as exc:
-        print(json.dumps({"status": "ERROR", "reason_code": exc.__class__.__name__}))
+        print(json.dumps({"status": "ERROR", "reason_code": exc.__class__.__name__, "diagnostic": _safe_diagnostic(exc)}))
         return 2
     print(json.dumps(report, sort_keys=True))
     return 0 if report["status"] == "CONFLICT_AUDITED" else 1
