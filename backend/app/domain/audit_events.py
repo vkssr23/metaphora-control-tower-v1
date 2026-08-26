@@ -65,6 +65,7 @@ ALLOWED_ACTIONS = {
     "invoice_readiness.material_change_invalidated", "accessorial.created", "accessorial.updated",
     "accessorial.approved", "accessorial.rejected", "invoice_package.created",
     "invoice_package.superseded", "invoice.ready_for_submission", "action_center.acknowledged",
+    "dispatch_authorization.shadow_evaluated",
 }
 SAFE_FIELDS = {
     "id", "truck_number", "status", "assigned_driver_id", "assigned_truck_id",
@@ -82,6 +83,7 @@ SAFE_FIELDS = {
     "execution_state", "execution_health", "exception_id", "severity", "owner_role",
     "readiness_case_id", "package_id", "accessorial_id", "accessorial_type", "currency",
     "billable_total", "invoice_id", "verdict", "storage_status", "size_bytes",
+    "decision", "subject", "evidence_freshness",
 }
 SENSITIVE = re.compile(r"password|secret|token|credential|authorization|api.?key|database|mongo|jwt|header|body|content", re.I)
 MAX_FIELDS = 32

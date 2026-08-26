@@ -20,6 +20,7 @@ from app.pickup_release_invalidation import preinvalidate_pickup_release, preinv
 from app.domain.party_verification import build_case_preinvalidation, build_passport_preinvalidation, is_insurance_document
 from app.execution_invalidation import preinvalidate_for_load, preinvalidate_for_snapshot
 from app.execution_material_change import control_material_load_change
+from app.dispatch_authorization_shadow import shadow_evaluate_boundary_stage_transition
 from app.domain.mutation_impact import MutationType, SourceEntityType, TargetDomain, impact_for, has_impact, plan_mutation
 from app.domain.invoice_authority import InvoiceAuthority, classify_invoice_authority, is_modern_invoice, legacy_write_allowed
 from app.domain.execution_eligibility import DRIVER_MATERIAL_FIELDS, TRUCK_MATERIAL_FIELDS
@@ -152,6 +153,7 @@ def register_load_routes(api, get_current_user, operational_write):
         origin_value = load.get("exception_origin_stage")
         try: exception_origin = LoadStage(origin_value) if origin_value else None
         except ValueError: exception_origin = None
+        await shadow_evaluate_boundary_stage_transition(db, settings, user, load, old_stage, data.stage, exception_origin)
         if not transition_allowed(old_stage, data.stage, exception_origin):
             raise HTTPException(409, f"Transition from {old_stage.value} to {data.stage.value} is not allowed")
         old = old_stage.value
