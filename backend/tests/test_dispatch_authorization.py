@@ -52,15 +52,28 @@ def test_authorized_when_clean():
     ({"status": "timed_out"}, set(), {"verify_timed_out"}),
     ({"status": "not_found"}, {"verify_broker_mc_not_found"}, set()),
     ({"status": "weird"}, set(), {"evidence_malformed"}),
-    ({"status": "ok", "broker_authority_status": "UNKNOWN"}, set(), {"verify_broker_authority_unknown", "verify_bond_insurance_requirement_unknown"}),
-    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED"}, set(), set()),
-    ({"status": "ok", "broker_authority_status": "INACTIVE", "bond_insurance_required": "NOT_REQUIRED"}, {"verify_broker_authority_inactive"}, set()),
-    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Red"}, {"verify_fraud_risk_red"}, set()),
+    # authority: ACTIVE positive; INACTIVE/OUT_OF_SERVICE/NOT_AUTHORIZED blocking; UNKNOWN/missing review; anything else malformed
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}, set(), set()),
+    ({"status": "ok", "broker_authority_status": "UNKNOWN", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}, set(), {"verify_broker_authority_unknown"}),
+    ({"status": "ok", "broker_authority_status": None, "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}, set(), {"verify_broker_authority_unknown"}),
+    ({"status": "ok", "broker_authority_status": "INACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}, {"verify_broker_authority_inactive"}, set()),
+    ({"status": "ok", "broker_authority_status": "OUT_OF_SERVICE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}, {"verify_broker_authority_inactive"}, set()),
+    ({"status": "ok", "broker_authority_status": "NOT_AUTHORIZED", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}, {"verify_broker_authority_inactive"}, set()),
+    ({"status": "ok", "broker_authority_status": "SOMETHING_NEW", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}, set(), {"evidence_malformed"}),
+    # bond requirement: NOT_REQUIRED positive; REQUIRED evaluates on_file; UNKNOWN/missing review; anything else malformed
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": None, "risk_level": "Green"}, set(), {"verify_bond_insurance_requirement_unknown"}),
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "REQUIRED", "bond_insurance_on_file": "PRESENT", "risk_level": "Green"}, set(), set()),
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "REQUIRED", "bond_insurance_on_file": "ABSENT", "risk_level": "Green"}, {"verify_bond_insurance_absent"}, set()),
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "REQUIRED", "bond_insurance_on_file": None, "risk_level": "Green"}, set(), {"verify_bond_insurance_on_file_unknown"}),
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "REQUIRED", "bond_insurance_on_file": "WEIRD", "risk_level": "Green"}, set(), {"evidence_malformed"}),
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "SOMETHING_ELSE", "risk_level": "Green"}, set(), {"evidence_malformed"}),
+    # risk: Green positive; Yellow review; Red blocking; missing/unexpected malformed
     ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Yellow"}, set(), {"verify_fraud_risk_yellow"}),
-    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": None}, set(), {"verify_bond_insurance_requirement_unknown"}),
-    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "REQUIRED", "bond_insurance_on_file": "ABSENT"}, {"verify_bond_insurance_absent"}, set()),
-    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "REQUIRED", "bond_insurance_on_file": None}, set(), {"verify_bond_insurance_on_file_unknown"}),
-    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "flags": [{"code": "SHARED_CONTACT_REVOKED_ENTITY"}]}, {"verify_shared_contact_revoked_entity"}, set()),
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Red"}, {"verify_fraud_risk_red"}, set()),
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED"}, set(), {"evidence_malformed"}),
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Purple"}, set(), {"evidence_malformed"}),
+    # flags
+    ({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green", "flags": [{"code": "SHARED_CONTACT_REVOKED_ENTITY"}]}, {"verify_shared_contact_revoked_entity"}, set()),
 ])
 def test_verify_reason_codes_tri_state_vocabulary(verify_result, expected_negatives, expected_reviews):
     negatives, reviews = da.verify_reason_codes(verify_result)
@@ -73,7 +86,7 @@ def test_bond_insurance_required_unknown_is_never_silently_ignored():
     # produced no reason code at all, silently discarding tri-state
     # evidence instead of surfacing it as REVIEW_REQUIRED.
     for required in (None, "", "UNKNOWN"):
-        negatives, reviews = da.verify_reason_codes({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": required})
+        negatives, reviews = da.verify_reason_codes({"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": required, "risk_level": "Green"})
         assert negatives == set()
         assert "verify_bond_insurance_requirement_unknown" in reviews
 
@@ -116,28 +129,51 @@ def test_passport_authorization_reason_codes_version_mismatch_is_review():
     (None, set(), {"party_verification_missing"}),
     ({"status": "cleared"}, set(), set()),
     ({"status": "blocked"}, {"party_verification_blocked"}, set()),
+    ({"status": "revoked"}, {"party_verification_blocked"}, set()),
     ({"status": "review_pending"}, set(), {"party_verification_not_cleared"}),
     ({"status": "findings_open"}, set(), {"party_verification_not_cleared"}),
     ({"status": "expired"}, set(), {"party_verification_not_cleared"}),
+    # actual evidence, not only the top-level status
+    ({"status": "cleared", "blocking_reasons": ["missing_broker_identifier"]}, {"party_verification_blocked"}, set()),
+    ({"status": "cleared", "risk_summary": {"blocking_signal_count": 1}}, {"party_verification_blocked"}, set()),
+    ({"status": "cleared", "findings": [{"status": "open", "blocking": True}]}, {"party_verification_blocked"}, set()),
+    ({"status": "cleared", "findings": [{"status": "open", "blocking": False}]}, set(), set()),
+    ({"status": "cleared", "findings": [{"status": "resolved", "blocking": True}]}, set(), set()),
 ])
 def test_party_verification_reason_codes(case, expected_negatives, expected_reviews):
     negatives, reviews = da.party_verification_reason_codes(case)
     assert negatives == expected_negatives and reviews == expected_reviews
 
 
+def test_party_verification_reason_codes_ambiguous_is_review_not_an_arbitrary_pick():
+    negatives, reviews = da.party_verification_reason_codes({"status": "cleared"}, ambiguous=True)
+    assert negatives == set() and reviews == {"party_verification_ambiguous"}
+
+
 @pytest.mark.parametrize("case,expected_negatives,expected_reviews", [
     (None, set(), {"execution_eligibility_missing"}),
-    ({"status": "eligible"}, set(), set()),
+    ({"status": "eligible", "verdict": "eligible"}, set(), set()),
     ({"status": "blocked"}, {"execution_eligibility_blocked"}, set()),
-    ({"status": "review_required"}, set(), {"execution_eligibility_not_eligible"}),
+    ({"status": "revoked"}, {"execution_eligibility_blocked"}, set()),
+    ({"status": "review_required", "verdict": "review_required"}, set(), {"execution_eligibility_not_eligible"}),
+    # actual evidence, not only the top-level status
+    ({"status": "eligible", "verdict": "blocked"}, {"execution_eligibility_blocked"}, set()),
+    ({"status": "eligible", "verdict": "eligible", "blocking_reasons": ["driver_assignment"]}, {"execution_eligibility_blocked"}, set()),
+    ({"status": "eligible", "verdict": "eligible", "checks": [{"type": "driver_assignment", "result": "fail"}]}, {"execution_eligibility_blocked"}, set()),
+    ({"status": "eligible", "verdict": "eligible", "checks": [{"type": "hos_readiness", "result": "warning"}]}, set(), set()),
 ])
 def test_execution_eligibility_reason_codes(case, expected_negatives, expected_reviews):
     negatives, reviews = da.execution_eligibility_reason_codes(case)
     assert negatives == expected_negatives and reviews == expected_reviews
 
 
+def test_execution_eligibility_reason_codes_ambiguous_is_review_not_an_arbitrary_pick():
+    negatives, reviews = da.execution_eligibility_reason_codes({"status": "eligible", "verdict": "eligible"}, ambiguous=True)
+    assert negatives == set() and reviews == {"execution_eligibility_ambiguous"}
+
+
 def test_evaluate_passport_authorization_authorized_requires_every_authority_positive():
-    clean_verify = {"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED"}
+    clean_verify = {"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}
     approved = {"status": "approved", "approved_version": 1, "version": 1}
     ready = {"ready_for_pickup_authorization": True}
     # party verification missing -> not AUTHORIZED even though everything else is clean
@@ -147,10 +183,15 @@ def test_evaluate_passport_authorization_authorized_requires_every_authority_pos
     # every authority affirmatively positive -> AUTHORIZED
     outcome = da.evaluate_passport_authorization(verify_result=clean_verify, passport=approved, readiness=ready, party_verification_case={"status": "cleared"})
     assert outcome.decision == da.DispatchDecision.AUTHORIZED
+    # ambiguous party verification -> not AUTHORIZED, distinct reason code
+    outcome = da.evaluate_passport_authorization(verify_result=clean_verify, passport=approved, readiness=ready,
+                                                  party_verification_case=None, party_verification_ambiguous=True)
+    assert outcome.decision == da.DispatchDecision.REVIEW_REQUIRED
+    assert outcome.reason_codes == ("party_verification_ambiguous",)
 
 
 def test_evaluate_boundary_stage_transition_requires_execution_eligibility_too():
-    clean_verify = {"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED"}
+    clean_verify = {"status": "ok", "broker_authority_status": "ACTIVE", "bond_insurance_required": "NOT_REQUIRED", "risk_level": "Green"}
     cleared_party = {"status": "cleared"}
     outcome = da.evaluate_boundary_stage_transition(
         verify_result=clean_verify, current_stage="Assigned", requested_stage="Dispatched", transition_is_allowed=True,
@@ -159,7 +200,7 @@ def test_evaluate_boundary_stage_transition_requires_execution_eligibility_too()
     assert outcome.reason_codes == ("execution_eligibility_missing",)
     outcome = da.evaluate_boundary_stage_transition(
         verify_result=clean_verify, current_stage="Assigned", requested_stage="Dispatched", transition_is_allowed=True,
-        party_verification_case=cleared_party, execution_eligibility_case={"status": "eligible"})
+        party_verification_case=cleared_party, execution_eligibility_case={"status": "eligible", "verdict": "eligible"})
     assert outcome.decision == da.DispatchDecision.AUTHORIZED
 
 
@@ -190,6 +231,80 @@ def test_is_dispatch_boundary_transition(current, requested, expected):
 
 def test_dispatch_boundary_transition_constant_is_assigned_to_dispatched():
     assert da.DISPATCH_BOUNDARY_TRANSITION == (LoadStage.ASSIGNED, LoadStage.DISPATCHED)
+
+
+# ---------------------------------------------------------------------------
+# Section A3: latest-case selection - deterministic tenant+load query,
+# sorted, bounded to two records, and ambiguous (not an arbitrary find_one()
+# pick) when more than one record matches.
+# ---------------------------------------------------------------------------
+
+class _RecordingCursor:
+    def __init__(self, docs):
+        self._docs = docs
+        self.sort_spec = None
+        self.to_list_length = None
+
+    def sort(self, spec):
+        self.sort_spec = spec
+        return self
+
+    async def to_list(self, length):
+        self.to_list_length = length
+        return self._docs[:length]
+
+
+class _RecordingCaseCollection:
+    def __init__(self, docs):
+        self._docs = docs
+        self.last_query = None
+        self.last_cursor = None
+
+    def find(self, query, *args, **kwargs):
+        self.last_query = query
+        matched = [d for d in self._docs if all(d.get(k) == v for k, v in query.items())]
+        self.last_cursor = _RecordingCursor(matched)
+        return self.last_cursor
+
+
+@pytest.mark.anyio
+async def test_latest_case_queries_tenant_and_load_sorted_and_bounded_to_two():
+    from app.dispatch_authorization_shadow import _latest_case
+    collection = _RecordingCaseCollection([{"id": "PVC1", "tenant_id": TA, "load_id": "L1", "status": "cleared"}])
+    case, ambiguous = await _latest_case(collection, USERS["ops"], "L1")
+    assert ambiguous is False and case["id"] == "PVC1"
+    assert collection.last_query == {"tenant_id": TA, "load_id": "L1"}
+    assert collection.last_cursor.sort_spec == [("updated_at", -1), ("version", -1), ("id", -1)]
+    assert collection.last_cursor.to_list_length == 2
+
+
+@pytest.mark.anyio
+async def test_latest_case_no_match_is_missing_not_ambiguous():
+    from app.dispatch_authorization_shadow import _latest_case
+    case, ambiguous = await _latest_case(_RecordingCaseCollection([]), USERS["ops"], "L1")
+    assert case is None and ambiguous is False
+
+
+@pytest.mark.anyio
+async def test_latest_case_more_than_one_match_is_ambiguous_not_an_arbitrary_pick():
+    from app.dispatch_authorization_shadow import _latest_case
+    collection = _RecordingCaseCollection([
+        {"id": "PVC1", "tenant_id": TA, "load_id": "L1", "status": "cleared", "updated_at": "2026-01-01"},
+        {"id": "PVC2", "tenant_id": TA, "load_id": "L1", "status": "blocked", "updated_at": "2026-01-02"},
+    ])
+    case, ambiguous = await _latest_case(collection, USERS["ops"], "L1")
+    assert case is None and ambiguous is True
+
+
+@pytest.mark.anyio
+async def test_latest_case_isolates_by_tenant():
+    from app.dispatch_authorization_shadow import _latest_case
+    collection = _RecordingCaseCollection([
+        {"id": "PVC1", "tenant_id": TA, "load_id": "L1", "status": "cleared"},
+        {"id": "PVC2", "tenant_id": TB, "load_id": "L1", "status": "blocked"},
+    ])
+    case, ambiguous = await _latest_case(collection, USERS["ops"], "L1")
+    assert ambiguous is False and case["id"] == "PVC1"  # tenant B's same-load-id case is invisible to tenant A
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +454,7 @@ def _cleared_party_case(load_id="L1", tenant=TA):
 
 
 def _eligible_execution_case(load_id="L1", tenant=TA):
-    return {"id": "EEC1", "tenant_id": tenant, "load_id": load_id, "version": 1, "status": "eligible"}
+    return {"id": "EEC1", "tenant_id": tenant, "load_id": load_id, "version": 1, "status": "eligible", "verdict": "eligible"}
 
 
 @pytest.fixture
@@ -506,6 +621,35 @@ def test_boundary_tenant_isolation(monkeypatch, api):
     assert ta_records and all(r["load_id"] == "L1" for r in ta_records)
     assert tb_records and all(r["load_id"] == "LB" for r in tb_records)
     assert ta_records[0]["decision"] == "AUTHORIZED" and tb_records[0]["decision"] == "AUTHORIZED"
+
+
+def test_boundary_duplicate_party_verification_cases_are_ambiguous_not_arbitrarily_selected(monkeypatch, api):
+    client, db = api
+    monkeypatch.setattr(party_verification_client, "fetch_broker_verification", _clean_verify)
+    # Simulates a production database without the uniqueness index this
+    # collection is supposed to have - two cases exist for the same
+    # tenant+load.
+    db.party_verification_cases.docs = [_cleared_party_case(), {**_cleared_party_case(), "id": "PVC2", "status": "blocked"}]
+    db.execution_eligibility_cases.docs = [_eligible_execution_case()]
+    response = client.post("/api/loads/L1/stage", json={"stage": "Dispatched"}, headers=h("ops"))
+    assert response.status_code == 200  # real endpoint still unaffected
+    records = _shadow_records(db, "L1", "boundary_stage_transition")
+    assert records[0]["decision"] == "REVIEW_REQUIRED"
+    assert records[0]["reason_codes"] == ["party_verification_ambiguous"]
+    assert not any(s["source"] == "party_verification_case" for s in records[0]["sources"])  # no arbitrary pick recorded either
+
+
+def test_boundary_ambiguity_is_tenant_scoped(monkeypatch, api):
+    client, db = api
+    monkeypatch.setattr(party_verification_client, "fetch_broker_verification", _clean_verify)
+    db.party_verification_cases.docs = [_cleared_party_case(), {**_cleared_party_case(), "id": "PVC2"}, _cleared_party_case("LB", TB)]
+    db.execution_eligibility_cases.docs = [_eligible_execution_case(), _eligible_execution_case("LB", TB)]
+    client.post("/api/loads/L1/stage", json={"stage": "Dispatched"}, headers=h("ops"))
+    client.post("/api/loads/LB/stage", json={"stage": "Dispatched"}, headers=h("foreign"))
+    ta_records = _shadow_records(db, "L1", "boundary_stage_transition")
+    tb_records = _shadow_records(db, "LB", "boundary_stage_transition")
+    assert ta_records[0]["decision"] == "REVIEW_REQUIRED" and "party_verification_ambiguous" in ta_records[0]["reason_codes"]
+    assert tb_records[0]["decision"] == "AUTHORIZED"  # tenant B's single case is unaffected by tenant A's duplicate
 
 
 def test_shadow_evaluation_is_latency_bounded_and_never_gates_the_response(monkeypatch, api):

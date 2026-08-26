@@ -76,8 +76,10 @@ class ReviewReasonCode(str, Enum):
     PASSPORT_VERSION_MISMATCH = "passport_version_mismatch"
     PARTY_VERIFICATION_MISSING = "party_verification_missing"
     PARTY_VERIFICATION_NOT_CLEARED = "party_verification_not_cleared"
+    PARTY_VERIFICATION_AMBIGUOUS = "party_verification_ambiguous"
     EXECUTION_ELIGIBILITY_MISSING = "execution_eligibility_missing"
     EXECUTION_ELIGIBILITY_NOT_ELIGIBLE = "execution_eligibility_not_eligible"
+    EXECUTION_ELIGIBILITY_AMBIGUOUS = "execution_eligibility_ambiguous"
 
 
 @dataclass(frozen=True)
@@ -99,14 +101,27 @@ def evaluate(negative_reason_codes, review_reason_codes) -> DispatchOutcome:
     return DispatchOutcome(DispatchDecision.AUTHORIZED, tuple())
 
 
+# Verify's own documented canonical vocabulary (see
+# app.infrastructure.party_verification_client and
+# app.domain.party_verification's evaluate()). Anything outside these
+# known sets - including a value outside {ACTIVE}+_AUTHORITY_NEGATIVE, or
+# a risk_level outside {Green,Yellow,Red} - is treated as malformed
+# evidence, never silently ignored and never treated as if it were the
+# documented UNKNOWN/undisclosed state.
+_AUTHORITY_NEGATIVE = {"INACTIVE", "OUT_OF_SERVICE", "NOT_AUTHORIZED"}
+_UNDISCLOSED = (None, "", "UNKNOWN")
+
+
 def verify_reason_codes(verify_result: dict | None) -> tuple[set[str], set[str]]:
-    """Map a Verify response (see app.infrastructure.party_verification_client)
-    to bounded negative/review reason codes, using the same status
-    vocabulary and blocking/non-blocking classification as
-    app.domain.party_verification.evaluate() - the integration is reused,
-    not reimplemented. "timed_out" is produced only by the shadow caller's
-    own bounded wait (app.dispatch_authorization_shadow), not by the
-    client itself."""
+    """Map a Verify response to bounded negative/review reason codes.
+    Every canonical field required for AUTHORIZED - broker authority,
+    bond requirement/on-file, risk level - is validated strictly against
+    Verify's documented vocabulary: the expected positive value is clean,
+    a documented negative value blocks, the documented UNKNOWN/undisclosed
+    state is a review, and any other unexpected value is malformed (also a
+    review) rather than being coerced into either extreme. "timed_out" is
+    produced only by the shadow caller's own bounded wait
+    (app.dispatch_authorization_shadow), not by the client itself."""
     negatives: set[str] = set()
     reviews: set[str] = set()
     if verify_result is None:
@@ -125,25 +140,45 @@ def verify_reason_codes(verify_result: dict | None) -> tuple[set[str], set[str]]
     if status != "ok":
         reviews.add(ReviewReasonCode.EVIDENCE_MALFORMED.value)
         return negatives, reviews
+
     authority = verify_result.get("broker_authority_status")
-    if authority in (None, "", "UNKNOWN"):
-        reviews.add(ReviewReasonCode.VERIFY_BROKER_AUTHORITY_UNKNOWN.value)
-    elif authority != "ACTIVE":
+    if authority == "ACTIVE":
+        pass
+    elif authority in _AUTHORITY_NEGATIVE:
         negatives.add(NegativeReasonCode.VERIFY_BROKER_AUTHORITY_INACTIVE.value)
+    elif authority in _UNDISCLOSED:
+        reviews.add(ReviewReasonCode.VERIFY_BROKER_AUTHORITY_UNKNOWN.value)
+    else:
+        reviews.add(ReviewReasonCode.EVIDENCE_MALFORMED.value)
+
     required = verify_result.get("bond_insurance_required")
     on_file = verify_result.get("bond_insurance_on_file")
-    if required in (None, "", "UNKNOWN"):
-        reviews.add(ReviewReasonCode.VERIFY_BOND_INSURANCE_REQUIREMENT_UNKNOWN.value)
+    if required == "NOT_REQUIRED":
+        pass
     elif required == "REQUIRED":
-        if on_file == "ABSENT":
+        if on_file == "PRESENT":
+            pass
+        elif on_file == "ABSENT":
             negatives.add(NegativeReasonCode.VERIFY_BOND_INSURANCE_ABSENT.value)
-        elif on_file != "PRESENT":
+        elif on_file in _UNDISCLOSED:
             reviews.add(ReviewReasonCode.VERIFY_BOND_INSURANCE_ON_FILE_UNKNOWN.value)
+        else:
+            reviews.add(ReviewReasonCode.EVIDENCE_MALFORMED.value)
+    elif required in _UNDISCLOSED:
+        reviews.add(ReviewReasonCode.VERIFY_BOND_INSURANCE_REQUIREMENT_UNKNOWN.value)
+    else:
+        reviews.add(ReviewReasonCode.EVIDENCE_MALFORMED.value)
+
     risk = verify_result.get("risk_level")
-    if risk == "Red":
-        negatives.add(NegativeReasonCode.VERIFY_FRAUD_RISK_RED.value)
+    if risk == "Green":
+        pass
     elif risk == "Yellow":
         reviews.add(ReviewReasonCode.VERIFY_FRAUD_RISK_YELLOW.value)
+    elif risk == "Red":
+        negatives.add(NegativeReasonCode.VERIFY_FRAUD_RISK_RED.value)
+    else:
+        reviews.add(ReviewReasonCode.EVIDENCE_MALFORMED.value)
+
     for flag in verify_result.get("flags") or []:
         if flag.get("code") == "SHARED_CONTACT_REVOKED_ENTITY":
             negatives.add(NegativeReasonCode.VERIFY_SHARED_CONTACT_REVOKED_ENTITY.value)
@@ -190,44 +225,83 @@ def boundary_stage_transition_reason_codes(current_stage: str | None, requested_
     return negatives, reviews
 
 
-def party_verification_reason_codes(case: dict | None) -> tuple[set[str], set[str]]:
-    """"cleared" is the only affirmatively positive status. "blocked" is
-    the only explicit negative (reached only via an admin's reasoned block
-    action). Every other status - draft, review_pending, findings_open,
-    expired, revoked, or a missing case entirely - is pending/ambiguous
-    evidence, not a denial."""
+def _party_verification_has_blocking_evidence(case: dict) -> bool:
+    """Checks the case's actual evidence, not just its top-level status:
+    unresolved/open blocking findings, a nonzero blocking-signal count, or
+    populated current blocking reasons (see app.domain.party_verification.
+    evaluate(): blocking_reasons/risk_summary.blocking_signal_count are
+    computed from exactly these open+blocking findings)."""
+    if case.get("blocking_reasons"):
+        return True
+    if (case.get("risk_summary") or {}).get("blocking_signal_count"):
+        return True
+    if any(f.get("status") == "open" and f.get("blocking") for f in case.get("findings") or []):
+        return True
+    return False
+
+
+def party_verification_reason_codes(case: dict | None, ambiguous: bool = False) -> tuple[set[str], set[str]]:
+    """"cleared" with no residual blocking evidence is the only
+    affirmatively positive state. status in {"blocked","revoked"}, or any
+    unresolved blocking evidence regardless of status (including a stale
+    "cleared" case that still carries blocking evidence), is an explicit
+    negative. Every other status - draft, review_pending, findings_open,
+    expired, a missing case, or more than one matching case for this
+    tenant+load (ambiguous) - is pending/ambiguous evidence, not a denial."""
+    if ambiguous:
+        return set(), {ReviewReasonCode.PARTY_VERIFICATION_AMBIGUOUS.value}
     if case is None:
         return set(), {ReviewReasonCode.PARTY_VERIFICATION_MISSING.value}
     status = case.get("status")
-    if status == "blocked":
+    if status in ("blocked", "revoked") or _party_verification_has_blocking_evidence(case):
         return {NegativeReasonCode.PARTY_VERIFICATION_BLOCKED.value}, set()
     if status != "cleared":
         return set(), {ReviewReasonCode.PARTY_VERIFICATION_NOT_CLEARED.value}
     return set(), set()
 
 
-def execution_eligibility_reason_codes(case: dict | None) -> tuple[set[str], set[str]]:
-    """Same shape as party_verification_reason_codes: "eligible" is the
-    only affirmatively positive status, "blocked" the only explicit
-    negative."""
+def _execution_eligibility_has_blocking_evidence(case: dict) -> bool:
+    """Verdict "blocked" is this codebase's actual ineligible verdict (see
+    app.domain.execution_eligibility.verdict()); "ineligible" never
+    appears as a literal value here. Also checks blocking_reasons and any
+    explicit failed/expired required check, not just the top-level
+    status/verdict fields."""
+    if case.get("verdict") == "blocked":
+        return True
+    if case.get("blocking_reasons"):
+        return True
+    if any(c.get("result") in ("fail", "expired") for c in case.get("checks") or []):
+        return True
+    return False
+
+
+def execution_eligibility_reason_codes(case: dict | None, ambiguous: bool = False) -> tuple[set[str], set[str]]:
+    """Positive only when status=="eligible", verdict=="eligible", and no
+    residual blocking evidence remains. status in {"blocked","revoked"} or
+    any blocking evidence is an explicit negative regardless of status.
+    Everything else pending/insufficient/expired/ambiguous falls to
+    review."""
+    if ambiguous:
+        return set(), {ReviewReasonCode.EXECUTION_ELIGIBILITY_AMBIGUOUS.value}
     if case is None:
         return set(), {ReviewReasonCode.EXECUTION_ELIGIBILITY_MISSING.value}
     status = case.get("status")
-    if status == "blocked":
+    if status in ("blocked", "revoked") or _execution_eligibility_has_blocking_evidence(case):
         return {NegativeReasonCode.EXECUTION_ELIGIBILITY_BLOCKED.value}, set()
-    if status != "eligible":
+    if status != "eligible" or case.get("verdict") != "eligible":
         return set(), {ReviewReasonCode.EXECUTION_ELIGIBILITY_NOT_ELIGIBLE.value}
     return set(), set()
 
 
 def evaluate_passport_authorization(*, verify_result: dict | None, passport: dict | None,
-                                    readiness: dict | None, party_verification_case: dict | None) -> DispatchOutcome:
+                                    readiness: dict | None, party_verification_case: dict | None,
+                                    party_verification_ambiguous: bool = False) -> DispatchOutcome:
     negatives: set[str] = set()
     reviews: set[str] = set()
     for neg, rev in (
         verify_reason_codes(verify_result),
         passport_authorization_reason_codes(passport, readiness),
-        party_verification_reason_codes(party_verification_case),
+        party_verification_reason_codes(party_verification_case, party_verification_ambiguous),
     ):
         negatives |= neg
         reviews |= rev
@@ -237,14 +311,16 @@ def evaluate_passport_authorization(*, verify_result: dict | None, passport: dic
 def evaluate_boundary_stage_transition(*, verify_result: dict | None, current_stage: str | None,
                                        requested_stage: str | None, transition_is_allowed: bool | None,
                                        party_verification_case: dict | None,
-                                       execution_eligibility_case: dict | None) -> DispatchOutcome:
+                                       execution_eligibility_case: dict | None,
+                                       party_verification_ambiguous: bool = False,
+                                       execution_eligibility_ambiguous: bool = False) -> DispatchOutcome:
     negatives: set[str] = set()
     reviews: set[str] = set()
     for neg, rev in (
         verify_reason_codes(verify_result),
         boundary_stage_transition_reason_codes(current_stage, requested_stage, transition_is_allowed),
-        party_verification_reason_codes(party_verification_case),
-        execution_eligibility_reason_codes(execution_eligibility_case),
+        party_verification_reason_codes(party_verification_case, party_verification_ambiguous),
+        execution_eligibility_reason_codes(execution_eligibility_case, execution_eligibility_ambiguous),
     ):
         negatives |= neg
         reviews |= rev

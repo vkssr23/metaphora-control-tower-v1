@@ -15,11 +15,12 @@ introduces an ENFORCED mode and the logic that actually gates on it.
 
 Latency: the boundary evaluator runs only for the exact dispatch boundary
 (app.domain.dispatch_authorization.DISPATCH_BOUNDARY_TRANSITION) - every
-other stage transition returns immediately with no I/O. For the calls
-that do run, the Verify fetch is capped at SHADOW_VERIFY_TIMEOUT_SECONDS
-regardless of Verify's own (configurable, default 5s) client timeout, so
-neither authorize-pickup nor stage-change can ever wait anywhere near
-Verify's worst case.
+other stage transition returns immediately with no I/O and adds nothing.
+For the two calls that do run (authorize-pickup always; stage-change only
+at the boundary), this is awaited inline and can add up to
+SHADOW_VERIFY_TIMEOUT_SECONDS (~1s) of latency to that request - capped
+well under Verify's own (configurable, default 5s) client timeout, but
+not zero.
 """
 from __future__ import annotations
 
@@ -51,12 +52,28 @@ async def _latest_accepted_rate(db, user, load_id):
     return next((r for r in rates if r.get("document_id") in rate_doc_ids), None)
 
 
+_CASE_ORDER = [("updated_at", -1), ("version", -1), ("id", -1)]
+
+
+async def _latest_case(collection, user, load_id):
+    """Deterministic tenant+load lookup, bounded to two records. A
+    production database may not yet have the uniqueness index that would
+    normally guarantee at most one case per (tenant, load) - if more than
+    one matching record exists, this returns (None, ambiguous=True)
+    rather than silently picking an arbitrary one via an unordered
+    find_one()."""
+    docs = await collection.find(tenant_filter(user, {"load_id": load_id}), {"_id": 0}).sort(_CASE_ORDER).to_list(2)
+    if len(docs) > 1:
+        return None, True
+    return (docs[0] if docs else None), False
+
+
 async def _party_verification_case(db, user, load_id):
-    return await db.party_verification_cases.find_one(tenant_filter(user, {"load_id": load_id}), {"_id": 0})
+    return await _latest_case(db.party_verification_cases, user, load_id)
 
 
 async def _execution_eligibility_case(db, user, load_id):
-    return await db.execution_eligibility_cases.find_one(tenant_filter(user, {"load_id": load_id}), {"_id": 0})
+    return await _latest_case(db.execution_eligibility_cases, user, load_id)
 
 
 async def _fetch_verify(settings, rate):
@@ -131,10 +148,11 @@ async def shadow_evaluate_passport_authorization(db, settings, user, passport, l
     internal failure."""
     try:
         rate = await _latest_accepted_rate(db, user, load["id"])
-        party_case = await _party_verification_case(db, user, load["id"])
+        party_case, party_ambiguous = await _party_verification_case(db, user, load["id"])
         verify_result = await _fetch_verify(settings, rate)
         outcome = evaluator.evaluate_passport_authorization(
-            verify_result=verify_result, passport=passport, readiness=readiness, party_verification_case=party_case)
+            verify_result=verify_result, passport=passport, readiness=readiness, party_verification_case=party_case,
+            party_verification_ambiguous=party_ambiguous)
         sources = [
             _source("load", load["id"], load.get("updated_at", "")),
             _source("load_passport", passport["id"], passport.get("version")),
@@ -159,15 +177,16 @@ async def shadow_evaluate_boundary_stage_transition(db, settings, user, load, cu
         return None
     try:
         rate = await _latest_accepted_rate(db, user, load["id"])
-        party_case = await _party_verification_case(db, user, load["id"])
-        eligibility_case = await _execution_eligibility_case(db, user, load["id"])
+        party_case, party_ambiguous = await _party_verification_case(db, user, load["id"])
+        eligibility_case, eligibility_ambiguous = await _execution_eligibility_case(db, user, load["id"])
         verify_result = await _fetch_verify(settings, rate)
         is_allowed = transition_allowed(current_stage, requested_stage, exception_origin)
         outcome = evaluator.evaluate_boundary_stage_transition(
             verify_result=verify_result, current_stage=current_stage.value if current_stage is not None else None,
             requested_stage=requested_stage.value if requested_stage is not None else None,
             transition_is_allowed=is_allowed, party_verification_case=party_case,
-            execution_eligibility_case=eligibility_case,
+            execution_eligibility_case=eligibility_case, party_verification_ambiguous=party_ambiguous,
+            execution_eligibility_ambiguous=eligibility_ambiguous,
         )
         sources = [
             _source("load", load["id"], load.get("updated_at", "")),
