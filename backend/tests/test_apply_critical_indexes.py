@@ -48,6 +48,7 @@ class FakeCollection:
         return 1 if (self.name, field) in self._db.force_multikey_on else 0
 
     async def create_index(self, keys, name, unique, partialFilterExpression=None):
+        self._db.create_index_calls.append((self.name, name))
         if self.name in self._db.fail_create_on:
             raise ExecutionTimeout("simulated create_index failure")
         self.indexes.append({
@@ -66,6 +67,7 @@ class FakeDB:
         self.force_conflict_on = force_conflict_on or set()
         self.force_multikey_on = force_multikey_on or set()
         self.fail_create_on = fail_create_on or set()
+        self.create_index_calls = []
         self.users = FakeCollection("users", self)
         self.tenants = FakeCollection("tenants", self)
         if seed_matching:
@@ -201,10 +203,12 @@ def test_rerun_after_partial_completion_only_creates_the_missing_one(capsys):
     assert set(out["skipped_already_present"]) == {"uq_users_email", "uq_tenants_metaphora_org_id"}
 
 
+class TimeoutDB(FakeDB):
+    async def list_collection_names(self):
+        raise ExecutionTimeout("simulated")
+
+
 def test_timeout_during_validation_fails_closed():
-    class TimeoutDB(FakeDB):
-        async def list_collection_names(self):
-            raise ExecutionTimeout("simulated")
     db = TimeoutDB()
     code = apply_tool.main(argv=["--apply", "--confirm", apply_tool.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
     assert code == 2
@@ -216,6 +220,108 @@ def test_output_never_contains_env_values(capsys):
     apply_tool.main(argv=["--apply", "--confirm", apply_tool.CONFIRMATION], environ={"MONGO_URL": "mongodb://user:pw@host/db", "DB_NAME": "proddb"}, client_factory=_factory(db))
     out = capsys.readouterr().out
     assert "pw@host" not in out and "proddb" not in out
+
+
+# ---- --check mode ----------------------------------------------------------
+
+def test_check_performs_zero_writes_on_clean_db(capsys):
+    db = FakeDB()
+    code = apply_tool.main(argv=["--check"], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["status"] == "READY"
+    assert db.create_index_calls == []
+    assert db.users.indexes == [] and db.tenants.indexes == []
+
+
+def test_check_performs_zero_writes_even_when_blocked(capsys):
+    db = FakeDB(force_conflict_on={"users"})
+    code = apply_tool.main(argv=["--check"], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and out["status"] == "BLOCKED"
+    assert db.create_index_calls == []
+
+
+def test_check_reports_exact_three_index_production_plan(capsys):
+    db = FakeDB()
+    code = apply_tool.main(argv=["--check"], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["status"] == "READY"
+    covered = set(out["correct"]) | set(out["missing"]) | set(out["drifted"])
+    assert covered == set(CRITICAL)
+    assert set(out["missing"]) == set(CRITICAL)  # nothing pre-seeded
+    assert out["correct"] == [] and out["drifted"] == []
+
+
+def test_check_and_apply_share_the_same_validator(monkeypatch):
+    """Patches _validate itself and proves both --check and --apply call it
+    with identical arguments — the two modes cannot diverge because they
+    run through one shared function, not parallel implementations."""
+    calls = []
+    real_validate = apply_tool._validate
+
+    async def spy(db, max_time_ms):
+        calls.append((db, max_time_ms))
+        return await real_validate(db, max_time_ms)
+
+    monkeypatch.setattr(apply_tool, "_validate", spy)
+
+    db = FakeDB()
+    apply_tool.main(argv=["--check"], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    apply_tool.main(argv=["--apply", "--confirm", apply_tool.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db))
+    assert len(calls) == 2
+    assert calls[0][1] == calls[1][1]  # same max_time_ms resolution
+    assert calls[0][0] is db and calls[1][0] is db  # same db, same validator function
+
+
+def test_check_and_apply_agree_on_conflict(capsys):
+    db_check = FakeDB(force_conflict_on={"users"})
+    code_check = apply_tool.main(argv=["--check"], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db_check))
+    check_out = json.loads(capsys.readouterr().out)
+
+    db_apply = FakeDB(force_conflict_on={"users"})
+    code_apply = apply_tool.main(argv=["--apply", "--confirm", apply_tool.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db_apply))
+    apply_out = json.loads(capsys.readouterr().out)
+
+    assert code_check == 1 and check_out["status"] == "BLOCKED"
+    assert code_apply == 2 and apply_out["status"] == "ABORT_VALIDATION_FAILED"
+    assert apply_out["per_index"]["uq_users_email"]["conflict_groups"] == check_out["conflict_counts"]["uq_users_email"]
+    assert db_check.create_index_calls == [] and db_apply.create_index_calls == []
+
+
+def test_check_and_apply_agree_on_drift(capsys):
+    db_check = FakeDB(seed_drift_on="uq_tenants_metaphora_org_id")
+    apply_tool.main(argv=["--check"], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db_check))
+    check_out = json.loads(capsys.readouterr().out)
+
+    db_apply = FakeDB(seed_drift_on="uq_tenants_metaphora_org_id")
+    apply_tool.main(argv=["--apply", "--confirm", apply_tool.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db_apply))
+    apply_out = json.loads(capsys.readouterr().out)
+
+    assert check_out["status"] == "BLOCKED" and "uq_tenants_metaphora_org_id" in check_out["drifted"]
+    assert apply_out["status"] == "ABORT_VALIDATION_FAILED"
+    assert apply_out["per_index"]["uq_tenants_metaphora_org_id"]["state"] == "DRIFT"
+    assert db_check.create_index_calls == [] and db_apply.create_index_calls == []
+
+
+def test_check_and_apply_agree_on_timeout(capsys):
+    db_check = TimeoutDB()
+    apply_tool.main(argv=["--check"], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db_check))
+    check_out = json.loads(capsys.readouterr().out)
+
+    db_apply = TimeoutDB()
+    apply_tool.main(argv=["--apply", "--confirm", apply_tool.CONFIRMATION], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=_factory(db_apply))
+    apply_out = json.loads(capsys.readouterr().out)
+
+    assert check_out["status"] == "INCOMPLETE"
+    assert apply_out["status"] == "INCOMPLETE_UNSAFE"
+    assert db_check.create_index_calls == [] and db_apply.create_index_calls == []
+
+
+def test_plan_mode_stays_offline_when_check_not_requested():
+    def forbidden(_uri, **_kw):
+        raise AssertionError("--plan must never connect")
+    code = apply_tool.main(argv=["--plan"], environ={"MONGO_URL": "x", "DB_NAME": "y"}, client_factory=forbidden)
+    assert code == 0
 
 
 def _called_names(tree):

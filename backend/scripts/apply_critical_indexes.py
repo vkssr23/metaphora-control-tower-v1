@@ -4,13 +4,24 @@
 
 --plan (default): prints the three exact manifest definitions. No DB access.
 
+--check: database-aware dry-run. Connects and runs the exact same
+_validate() apply() calls immediately before writing — same bounded
+conflict/multikey/collation checks, same drift comparison against
+existing indexes — and reports READY/BLOCKED/INCOMPLETE plus which of the
+three are correct/missing/drifted and their conflict counts. Never calls
+create_index or any other write operation. Sharing _validate() between
+--check and --apply (rather than two separate implementations) is what
+guarantees the two modes can't silently diverge on what they consider
+safe.
+
 --apply requires --confirm CREATE_CRITICAL_INDEXES_V1 (checked before any
-client is constructed). Before any write, it reruns the same bounded
-conflict/multikey/collation checks as index_migration_preflight.py using
-the manifest's current (corrected) definitions, plus a drift check: an
-index with the same name but a different definition already present is
-never touched — creation aborts entirely, for all three, rather than risk
-silently living with (or worse, altering) an unexpected definition.
+client is constructed). Before any write, it reruns _validate() — the
+identical bounded conflict/multikey/collation checks as
+index_migration_preflight.py, using the manifest's current (corrected)
+definitions, plus the drift check: an index with the same name but a
+different definition already present is never touched — creation aborts
+entirely, for all three, rather than risk silently living with (or worse,
+altering) an unexpected definition.
 
 Only if every one of the three checks out clean does it create the missing
 ones, one at a time, in the fixed order above. After each create_index call
@@ -83,7 +94,10 @@ async def _validate(db, max_time_ms: int) -> dict:
         reject_unmodeled_collation(index)
 
     collections = sorted({x.collection for x in indexes})
-    existing_collections = set(await db.list_collection_names())
+    try:
+        existing_collections = set(await db.list_collection_names())
+    except PyMongoError as exc:
+        raise PreflightTimeout("list_collection_names") from exc
     observed = {}
     for collection in collections:
         if collection not in existing_collections:
@@ -119,6 +133,32 @@ async def _validate(db, max_time_ms: int) -> dict:
         ok = ok and clean
         per_index[index.name] = {"state": state, "conflict_groups": conflict_groups, "multikey": multikey, "clean": clean}
     return {"ok": ok, "per_index": per_index}
+
+
+async def check(mongo_url: str, db_name: str, client_factory: Callable, max_time_ms: int) -> dict:
+    """Database-aware dry-run: runs the exact same _validate() apply() calls
+    immediately before writing, and never calls create_index or any other
+    write operation. Shares the validator with apply() so the two modes
+    cannot silently diverge in what they consider safe."""
+    client = client_factory(mongo_url, serverSelectionTimeoutMS=DEFAULT_MAX_TIME_MS, connectTimeoutMS=DEFAULT_MAX_TIME_MS)
+    try:
+        db = client[db_name]
+        try:
+            validation = await _validate(db, max_time_ms)
+        except PreflightTimeout as exc:
+            return {"status": "INCOMPLETE", "reason": "operation_timeout", "stage": exc.stage, "collection": exc.collection}
+
+        correct = [n for n, v in validation["per_index"].items() if v["state"] == "MATCHES"]
+        missing = [n for n, v in validation["per_index"].items() if v["state"] == "MISSING"]
+        drifted = [n for n, v in validation["per_index"].items() if v["state"] == "DRIFT"]
+        conflict_counts = {n: v["conflict_groups"] for n, v in validation["per_index"].items() if v["conflict_groups"]}
+        return {
+            "status": "READY" if validation["ok"] else "BLOCKED",
+            "correct": correct, "missing": missing, "drifted": drifted,
+            "conflict_counts": conflict_counts,
+        }
+    finally:
+        client.close()
 
 
 async def apply(mongo_url: str, db_name: str, client_factory: Callable, max_time_ms: int) -> dict:
@@ -171,15 +211,17 @@ def main(argv: list[str] | None = None, environ: dict | None = None, client_fact
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true")
+    mode.add_argument("--check", action="store_true")
     mode.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm", default=None)
     args = parser.parse_args(argv if argv is not None else [])
 
-    if not args.apply:
+    if not args.check and not args.apply:
+        # Default and --plan: offline manifest display only, no DB access.
         print(json.dumps(_plan(), sort_keys=True))
         return 0
 
-    if args.confirm != CONFIRMATION:
+    if args.apply and args.confirm != CONFIRMATION:
         print(json.dumps({"status": "ABORT_CONFIRMATION_REQUIRED"}))
         return 2
 
@@ -191,12 +233,17 @@ def main(argv: list[str] | None = None, environ: dict | None = None, client_fact
     max_time_ms = resolve_max_time_ms(env)
 
     try:
-        report = asyncio.run(apply(mongo_url, db_name, client_factory, max_time_ms))
+        if args.check:
+            report = asyncio.run(check(mongo_url, db_name, client_factory, max_time_ms))
+        else:
+            report = asyncio.run(apply(mongo_url, db_name, client_factory, max_time_ms))
     except Exception as exc:
         print(json.dumps({"status": "ERROR", "reason_code": exc.__class__.__name__}))
         return 2
 
     print(json.dumps(report, sort_keys=True))
+    if args.check:
+        return 0 if report["status"] == "READY" else 1
     return 0 if report["status"] == "COMPLETE" else 2
 
 
