@@ -47,8 +47,13 @@ class FakeCollection:
         group = [{"_id": ORG_ID, "ids": [TENANT_A, TENANT_B], "n": 2}] if self._tenants_by_id else []
         return FakeCursor(group)
 
-    async def find_one(self, filt, projection=None, maxTimeMS=None):
-        self._calls.append(("find_one", self._name, maxTimeMS))
+    async def find_one(self, filt, projection=None, *, max_time_ms=None):
+        # Deliberately strict, no **kwargs catch-all: real pymongo find()/
+        # find_one() build a Cursor whose __init__ has an explicit parameter
+        # list (max_time_ms, snake_case) and no catch-all either — passing
+        # the camelCase maxTimeMS used by aggregate()/count_documents()/
+        # command() here must raise TypeError, exactly like the real driver.
+        self._calls.append(("find_one", self._name, max_time_ms))
         if "find_one" in self._timeout_on:
             raise ExecutionTimeout("simulated timeout")
         return self._tenants_by_id.get(filt.get("id"))
@@ -163,6 +168,35 @@ def test_reassignment_fields_enumerate_tenant_id_and_scoped_collections():
     assert rf["sso_link_field_on_tenants"] == "metaphora_org_id"
 
 
+def test_find_one_uses_max_time_ms_not_camelcase_and_succeeds():
+    """Regression for the production TypeError: find()/find_one() route into
+    pymongo's Cursor, whose __init__ has an explicit parameter list
+    (max_time_ms) and no **kwargs catch-all — unlike aggregate()/
+    count_documents()/command(). The strict FakeCollection.find_one above
+    would raise TypeError on the old maxTimeMS= call; a clean CONFLICT_AUDITED
+    result here proves the fixed call matches the real driver's contract."""
+    tenants_by_id, related_counts = _standard_fixture()
+    client = FakeClient(tenants_by_id, related_counts)
+    report = asyncio.run(audit.run_audit("mongodb://fake", "db", client_factory=lambda uri, **kw: client))
+    assert report["status"] == "CONFLICT_AUDITED"
+    find_one_calls = [c for c in client.calls if c[0] == "find_one"]
+    assert find_one_calls and all(c[2] is not None for c in find_one_calls)
+
+
+def test_old_camelcase_kwarg_would_fail_against_the_real_driver_contract():
+    """Fails under the previously-shipped call pattern: proves the fake's
+    find_one has no **kwargs catch-all, so maxTimeMS= (the old bug) raises
+    TypeError exactly as the real pymongo Cursor does."""
+    tenants_by_id, related_counts = _standard_fixture()
+    client = FakeClient(tenants_by_id, related_counts)
+    collection = client["db"].tenants
+    try:
+        asyncio.run(collection.find_one({"id": TENANT_A}, {"_id": 0}, maxTimeMS=4000))
+        raise AssertionError("expected TypeError for unexpected keyword argument 'maxTimeMS'")
+    except TypeError:
+        pass
+
+
 def test_no_conflict_group_reports_clean_status():
     client = FakeClient(tenants_by_id={}, related_counts={})
     report = asyncio.run(audit.run_audit("mongodb://fake", "db", client_factory=lambda uri, **kw: client))
@@ -188,6 +222,30 @@ def test_missing_env_fails_closed_without_connecting():
         raise AssertionError("should never construct a client without MONGO_URL/DB_NAME")
     code = audit.main(environ={}, client_factory=forbidden)
     assert code == 2
+
+
+def test_safe_diagnostic_contains_only_file_function_line():
+    try:
+        raise ValueError("a secret-looking value that must never be echoed: sk_live_12345")
+    except ValueError as exc:
+        diag = audit._safe_diagnostic(exc)
+    assert set(diag.keys()) == {"file", "function", "line"}
+    assert diag["function"] == "test_safe_diagnostic_contains_only_file_function_line"
+    assert isinstance(diag["line"], int)
+    dumped = json.dumps(diag)
+    assert "sk_live_12345" not in dumped and "secret-looking" not in dumped
+
+
+def test_main_error_path_never_prints_exception_message(capsys):
+    def raises_with_secret(_uri, **_kw):
+        raise TypeError("unexpected keyword argument 'maxTimeMS' near mongodb://user:hunter2@host/db")
+    code = audit.main(environ={"MONGO_URL": "mongodb://fake", "DB_NAME": "db"}, client_factory=raises_with_secret)
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "hunter2" not in out and "maxTimeMS" not in out
+    parsed = json.loads(out)
+    assert parsed["reason_code"] == "TypeError"
+    assert set(parsed["diagnostic"].keys()) == {"file", "function", "line"}
 
 
 def _called_names(tree):
