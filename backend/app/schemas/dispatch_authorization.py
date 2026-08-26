@@ -26,7 +26,15 @@ class DispatchDecision(str, Enum):
 class EvidenceFreshness(str, Enum):
     CURRENT = "current"
     UNAVAILABLE = "unavailable"
+    TIMED_OUT = "timed_out"
     MISSING = "missing"
+
+
+class EvaluationMode(str, Enum):
+    """PR1 only ever writes SHADOW: no flag anywhere reads this value to
+    change behavior. A later change introduces an ENFORCED mode plus the
+    logic that actually gates on it."""
+    SHADOW = "SHADOW"
 
 
 class SourceReference(BaseModel):
@@ -48,6 +56,6 @@ class DispatchAuthorizationEvaluation(BaseModel):
     reason_codes: list[str] = Field(default_factory=list, max_length=16)
     sources: list[SourceReference] = Field(default_factory=list, max_length=8)
     evidence_freshness: EvidenceFreshness
-    gate_enforced: bool = False
+    mode: EvaluationMode = EvaluationMode.SHADOW
     evaluated_at: str
     input_hash: str = Field(max_length=64)

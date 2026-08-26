@@ -1,13 +1,21 @@
 """Append-only, idempotent writer for dispatch-authorization shadow evaluations.
 
-Standalone-Mongo-safe: no transactions are available, so idempotent
-replay relies on the unique `uq_dispatch_authorization_evaluations_input`
-index (tenant_id, load_id, subject, input_hash) declared in
-app.infrastructure.index_manifest, plus catching the insert race and
-re-reading the winner - the same pattern used by
-app.infrastructure.operations.create_or_replay. There is no update path:
-a record is either inserted once or, on a replayed identical evaluation,
-the existing record is returned unchanged.
+Idempotency does NOT depend on the custom index declared in
+app.infrastructure.index_manifest - that manifest is explicitly never
+auto-applied (see its own module docstring), so relying on it alone would
+leave this collection without real idempotency until a separately gated
+index migration is run. Instead, the document's own Mongo `_id` is set to
+a deterministic hash of the full decision-relevant input - tenant, load,
+subject, decision, reason codes, load version, evaluator version,
+normalized source ids/versions, and evidence freshness - relying on the
+`_id` uniqueness every Mongo collection already enforces by default, with
+no migration required. A repeated call with identical input therefore
+always collides on `_id` and is replayed (the existing document is
+returned) rather than duplicated; a call where any of that input changed
+- including source versions or freshness, even if the resulting decision
+happens to be unchanged - gets a new `_id` and a new append-only record.
+The manifest's compound index is kept for query-time lookups once its
+own migration is separately applied; it is not what correctness rests on.
 """
 from __future__ import annotations
 
@@ -16,19 +24,27 @@ import json
 from typing import Any, Mapping, Sequence
 
 from app.domain.dispatch_authorization import DispatchOutcome
-from app.runtime import new_id, now_iso
+from app.runtime import now_iso
 from app.schemas.dispatch_authorization import DispatchAuthorizationEvaluation
 
 
-def compute_input_hash(*, subject: str, decision: str, reason_codes: Sequence[str],
-                        load_version: str, evaluator_version: str) -> str:
+def _normalized_sources(sources: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    normalized = [
+        {"source": str(s.get("source", "")), "id": str(s.get("id", "")), "version": str(s.get("version", ""))}
+        for s in sources
+    ]
+    return sorted(normalized, key=lambda s: (s["source"], s["id"]))
+
+
+def compute_deterministic_id(*, tenant_id: str, load_id: str, subject: str, decision: str,
+                             reason_codes: Sequence[str], load_version: str, evaluator_version: str,
+                             sources: Sequence[Mapping[str, Any]], evidence_freshness: str) -> str:
     canonical = json.dumps(
         {
-            "subject": subject,
-            "decision": decision,
-            "reason_codes": sorted(reason_codes),
-            "load_version": load_version,
-            "evaluator_version": evaluator_version,
+            "tenant_id": tenant_id, "load_id": load_id, "subject": subject, "decision": decision,
+            "reason_codes": sorted(reason_codes), "load_version": load_version,
+            "evaluator_version": evaluator_version, "sources": _normalized_sources(sources),
+            "evidence_freshness": evidence_freshness,
         },
         sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     )
@@ -38,27 +54,26 @@ def compute_input_hash(*, subject: str, decision: str, reason_codes: Sequence[st
 async def record_evaluation(collection, *, tenant_id: str, load_id: str, subject: str,
                             outcome: DispatchOutcome, load_version: str,
                             sources: Sequence[Mapping[str, Any]], evidence_freshness: str,
-                            gate_enforced: bool) -> dict[str, Any]:
-    input_hash = compute_input_hash(
-        subject=subject, decision=outcome.decision.value, reason_codes=outcome.reason_codes,
-        load_version=load_version or "", evaluator_version=outcome.evaluator_version,
+                            mode: str) -> dict[str, Any]:
+    deterministic_id = compute_deterministic_id(
+        tenant_id=tenant_id, load_id=load_id, subject=subject, decision=outcome.decision.value,
+        reason_codes=outcome.reason_codes, load_version=load_version or "", evaluator_version=outcome.evaluator_version,
+        sources=sources, evidence_freshness=evidence_freshness,
     )
     record = DispatchAuthorizationEvaluation(
-        id=new_id("DAE"), tenant_id=tenant_id, load_id=load_id, subject=subject,
+        id=f"DAE_{deterministic_id[:24]}", tenant_id=tenant_id, load_id=load_id, subject=subject,
         decision=outcome.decision.value, evaluator_version=outcome.evaluator_version,
         load_version=load_version or "", reason_codes=list(outcome.reason_codes),
-        sources=list(sources), evidence_freshness=evidence_freshness, gate_enforced=gate_enforced,
-        evaluated_at=now_iso(), input_hash=input_hash,
+        sources=list(sources), evidence_freshness=evidence_freshness, mode=mode,
+        evaluated_at=now_iso(), input_hash=deterministic_id,
     )
-    doc = record.model_dump(mode="json")
+    payload = record.model_dump(mode="json")
     try:
-        await collection.insert_one(dict(doc))
+        await collection.insert_one({**payload, "_id": deterministic_id})
     except Exception:
-        existing = await collection.find_one(
-            {"tenant_id": tenant_id, "load_id": load_id, "subject": subject, "input_hash": input_hash},
-            {"_id": 0},
-        )
+        existing = await collection.find_one({"_id": deterministic_id})
         if existing is not None:
+            existing.pop("_id", None)
             return existing
         raise
-    return doc
+    return payload
