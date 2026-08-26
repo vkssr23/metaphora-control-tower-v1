@@ -30,8 +30,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import PyMongoError
 
+from app.infrastructure.index_manifest import expected_indexes
 from app.production_integrity import TENANT_SCOPED
 from scripts.index_migration_preflight import DEFAULT_MAX_TIME_MS, MAX_ALLOWED_MAX_TIME_MS, resolve_max_time_ms
+
+# Single source of truth: the manifest's own corrected partial filter for
+# uq_tenants_metaphora_org_id (excludes missing, null, and empty string —
+# see index_manifest.py for why $exists:true alone was wrong).
+_ORG_ID_PARTIAL_FILTER = next(x.partial_filter for x in expected_indexes() if x.name == "uq_tenants_metaphora_org_id")
 
 # Heuristic only — no codified smoke-tenant id/flag exists in this schema.
 # Verify org_ids are small sequential integers, so a SHA-256 fingerprint
@@ -52,9 +58,31 @@ def fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _org_id_shape(doc: dict) -> dict:
+    """Never returns the raw value — only presence/type/empty-ness facts."""
+    exists = "metaphora_org_id" in doc
+    value = doc.get("metaphora_org_id")
+    if not exists:
+        bson_type = "missing"
+    elif value is None:
+        bson_type = "null"
+    elif isinstance(value, str):
+        bson_type = "string"
+    else:
+        bson_type = type(value).__name__
+    is_string = isinstance(value, str)
+    return {
+        "exists": exists,
+        "bson_type": bson_type,
+        "is_null": exists and value is None,
+        "is_empty_or_whitespace": is_string and value.strip() == "",
+        "string_length": len(value) if is_string else None,
+    }
+
+
 async def _find_conflicting_group(db, max_time_ms: int) -> dict | None:
     pipeline = [
-        {"$match": {"metaphora_org_id": {"$exists": True}}},
+        {"$match": _ORG_ID_PARTIAL_FILTER},
         {"$group": {"_id": "$metaphora_org_id", "ids": {"$push": "$id"}, "n": {"$sum": 1}}},
         {"$match": {"n": {"$gt": 1}}},
         {"$limit": 1},
@@ -99,7 +127,7 @@ async def _tenant_report(db, tenant_id: str, max_time_ms: int) -> dict:
         "created_at": doc.get("created_at"),
         "status": doc.get("status"),
         "is_known_smoke_tenant": is_smoke,
-        "has_metaphora_org_id": bool(doc.get("metaphora_org_id")),
+        "metaphora_org_id_shape": _org_id_shape(doc),
         "user_count": related_counts.get("users", 0),
         "related_record_counts": related_counts,
     }
